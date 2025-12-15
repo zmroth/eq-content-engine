@@ -45,10 +45,29 @@ OP_ExpansionInfo: 0x7bb4
 - DES-CBC encryption for login authentication
 - Fragment reassembly for large packets (guild list can be 96KB+)
 
+## EQEmu Documentation (Local)
+
+Pre-extracted documentation from docs.eqemu.dev is available in the `/docs` folder:
+
+| File | Content | Size |
+|------|---------|------|
+| `eqemu-docs-quest-api.md` | Quest API, Lua/Perl methods, constants | 614KB |
+| `eqemu-docs-server.md` | Server setup, commands, operations | 1.9MB |
+| `eqemu-docs-schema.md` | Database tables and schema | 345KB |
+| `eqemu-docs-client.md` | Client files, zones, models | 951KB |
+| `eqemu-docs-developer.md` | Development guides, conventions | 63KB |
+| `eqemu-docs-all.md` | Complete combined documentation | 4MB |
+
+**Use these files for context instead of fetching from the web.**
+
+To regenerate docs from source: `node scripts/parse-docs.js`
+
 ## Project Structure
 
 ```
 eq-content-engine/
+├── docs/                         # Extracted EQEmu documentation (use for context)
+├── scripts/                      # Build/parse scripts
 ├── src/
 │   ├── client/                    # Headless EQ client
 │   │   ├── eq-client.ts          # Main client class

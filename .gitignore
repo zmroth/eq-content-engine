@@ -25,3 +25,6 @@ Thumbs.db
 
 # Test output
 coverage/
+
+# Original website mirror (large, use /docs instead)
+docs-eqemu-dev website/
