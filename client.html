@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>EQ Content Engine - MUD Client</title>
+  <style>
+    body {
+      background: #1a1a2e;
+      color: #00ff00;
+      font-family: 'Courier New', monospace;
+      margin: 0;
+      padding: 20px;
+    }
+    #terminal {
+      background: #0f0f1a;
+      border: 2px solid #333;
+      padding: 15px;
+      height: 500px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      margin-bottom: 10px;
+    }
+    #input-line {
+      display: flex;
+      gap: 10px;
+    }
+    #prompt {
+      color: #00ff00;
+    }
+    #command {
+      flex: 1;
+      background: #0f0f1a;
+      border: 1px solid #333;
+      color: #00ff00;
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+      padding: 8px;
+    }
+    #command:focus {
+      outline: none;
+      border-color: #00ff00;
+    }
+    button {
+      background: #333;
+      color: #00ff00;
+      border: 1px solid #00ff00;
+      padding: 8px 20px;
+      cursor: pointer;
+      font-family: 'Courier New', monospace;
+    }
+    button:hover {
+      background: #00ff00;
+      color: #0f0f1a;
+    }
+    .error { color: #ff4444; }
+    .system { color: #ffff00; }
+    .response { color: #00ff00; }
+    h1 {
+      color: #00ff00;
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    #status {
+      text-align: right;
+      margin-bottom: 10px;
+    }
+    .connected { color: #00ff00; }
+    .disconnected { color: #ff4444; }
+  </style>
+</head>
+<body>
+  <h1>EQ Content Engine - MUD Client</h1>
+  <div id="status">Status: <span id="conn-status" class="disconnected">Disconnected</span></div>
+  <div id="terminal"></div>
+  <div id="input-line">
+    <span id="prompt">&gt;</span>
+    <input type="text" id="command" placeholder="Type a command (help for commands)" autofocus>
+    <button onclick="sendCommand()">Send</button>
+    <button onclick="connect()">Reconnect</button>
+  </div>
+
+  <script>
+    let ws = null;
+    const terminal = document.getElementById('terminal');
+    const command = document.getElementById('command');
+    const status = document.getElementById('conn-status');
+
+    function appendOutput(text, className = '') {
+      const line = document.createElement('div');
+      line.textContent = text;
+      if (className) line.className = className;
+      terminal.appendChild(line);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function connect() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+
+      appendOutput('Connecting to ws://localhost:8765...', 'system');
+
+      try {
+        ws = new WebSocket('ws://localhost:8765');
+
+        ws.onopen = function() {
+          status.textContent = 'Connected';
+          status.className = 'connected';
+          appendOutput('Connected!', 'system');
+        };
+
+        ws.onmessage = function(event) {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.message) {
+              appendOutput(data.message, data.type === 'error' ? 'error' : 'response');
+            }
+          } catch {
+            appendOutput(event.data, 'response');
+          }
+        };
+
+        ws.onclose = function() {
+          status.textContent = 'Disconnected';
+          status.className = 'disconnected';
+          appendOutput('Disconnected from server.', 'error');
+        };
+
+        ws.onerror = function(error) {
+          appendOutput('WebSocket error. Make sure the server is running.', 'error');
+          appendOutput('Run: cd ~/eq-content-engine && npm run server', 'system');
+        };
+      } catch (e) {
+        appendOutput('Failed to connect: ' + e.message, 'error');
+      }
+    }
+
+    function sendCommand() {
+      const cmd = command.value.trim();
+      if (!cmd) return;
+
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendOutput('Not connected. Click Reconnect.', 'error');
+        return;
+      }
+
+      appendOutput('> ' + cmd, 'system');
+      ws.send(cmd);
+      command.value = '';
+    }
+
+    command.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        sendCommand();
+      }
+    });
+
+    // Auto-connect on load
+    connect();
+  </script>
+</body>
+</html>

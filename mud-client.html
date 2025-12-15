@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>EverQuest MUD Client</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #00ff00;
+      font-family: 'Courier New', 'Lucida Console', monospace;
+      margin: 0;
+      padding: 20px;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    #container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    #terminal {
+      background: #0f0f0f;
+      border: 2px solid #00ff00;
+      padding: 15px;
+      height: 65vh;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    #input-area {
+      display: flex;
+      margin-top: 10px;
+      gap: 10px;
+    }
+    #prompt {
+      color: #00ff00;
+      padding: 10px;
+      font-size: 16px;
+    }
+    #cmd {
+      flex: 1;
+      background: #0f0f0f;
+      border: 2px solid #00ff00;
+      color: #00ff00;
+      font-family: inherit;
+      font-size: 14px;
+      padding: 10px;
+    }
+    #cmd:focus {
+      outline: none;
+      border-color: #00ff88;
+    }
+    button {
+      background: #0f0f0f;
+      border: 2px solid #00ff00;
+      color: #00ff00;
+      padding: 10px 25px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 14px;
+    }
+    button:hover {
+      background: #00ff00;
+      color: #000;
+    }
+    #status {
+      text-align: center;
+      padding: 10px;
+      border-bottom: 1px solid #333;
+      margin-bottom: 10px;
+      font-size: 12px;
+    }
+    .connected { color: #00ff00; }
+    .disconnected { color: #ff0000; }
+
+    /* Output types */
+    .output-normal { color: #00ff00; }
+    .output-error { color: #ff0000; }
+    .output-status { color: #888888; }
+    .output-zone { color: #00ffff; }
+    .output-spawn { color: #666666; }
+    .output-despawn { color: #444444; }
+    .output-combat { color: #ffaa00; }
+    .output-death { color: #ff0000; font-weight: bold; }
+    .output-say { color: #ffff00; }
+    .output-shout { color: #ff8800; }
+    .output-ooc { color: #00ffff; }
+    .output-tell { color: #ff00ff; }
+    .output-group { color: #00ff88; }
+    .output-info { color: #aaaaaa; }
+
+    #quick-cmds {
+      display: flex;
+      gap: 5px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    #quick-cmds button {
+      padding: 5px 12px;
+      font-size: 12px;
+    }
+
+    .history-hint {
+      color: #666;
+      font-size: 12px;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="status">
+      <span id="conn" class="disconnected">● DISCONNECTED</span>
+    </div>
+    <div id="terminal"></div>
+    <div id="input-area">
+      <span id="prompt">&gt;</span>
+      <input type="text" id="cmd" placeholder="Type command (help for commands)" autofocus autocomplete="off">
+      <button onclick="send()">Send</button>
+    </div>
+    <div id="quick-cmds">
+      <button onclick="sendCmd('look')">Look</button>
+      <button onclick="sendCmd('map')">Map</button>
+      <button onclick="sendCmd('who')">Who</button>
+      <button onclick="sendCmd('combat')">Combat</button>
+      <button onclick="sendCmd('inventory')">Inv</button>
+      <button onclick="sendCmd('help')">Help</button>
+      <button onclick="clearTerminal()">Clear</button>
+    </div>
+    <div class="history-hint">↑/↓ for command history</div>
+  </div>
+
+  <script>
+    const terminal = document.getElementById('terminal');
+    const cmd = document.getElementById('cmd');
+    const conn = document.getElementById('conn');
+    let ws = null;
+    let commandHistory = [];
+    let historyIndex = -1;
+
+    function log(text, type = 'normal') {
+      const div = document.createElement('div');
+      div.textContent = text;
+      div.className = 'output-' + type;
+      terminal.appendChild(div);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function clearTerminal() {
+      terminal.innerHTML = '';
+    }
+
+    function connect() {
+      ws = new WebSocket('ws://localhost:8768');
+
+      ws.onopen = () => {
+        conn.textContent = '● CONNECTED';
+        conn.className = 'connected';
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const type = data.type || 'normal';
+
+          if (data.message) {
+            log(data.message, type);
+          }
+        } catch {
+          log(e.data);
+        }
+      };
+
+      ws.onclose = () => {
+        conn.textContent = '● DISCONNECTED';
+        conn.className = 'disconnected';
+        log('\n[Connection lost. Reconnecting...]', 'status');
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        log('\n[Connection error - is the MUD server running?]', 'error');
+        log('[Run: cd ~/eq-content-engine && npm run mud]', 'status');
+      };
+    }
+
+    function send() {
+      const text = cmd.value.trim();
+      if (!text) return;
+
+      // Add to history
+      if (text !== commandHistory[commandHistory.length - 1]) {
+        commandHistory.push(text);
+        if (commandHistory.length > 50) commandHistory.shift();
+      }
+      historyIndex = commandHistory.length;
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        log('\n> ' + text, 'status');
+        ws.send(text);
+      }
+      cmd.value = '';
+    }
+
+    function sendCmd(c) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        log('\n> ' + c, 'status');
+        ws.send(c);
+      }
+    }
+
+    cmd.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        send();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (historyIndex > 0) {
+          historyIndex--;
+          cmd.value = commandHistory[historyIndex];
+        }
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (historyIndex < commandHistory.length - 1) {
+          historyIndex++;
+          cmd.value = commandHistory[historyIndex];
+        } else {
+          historyIndex = commandHistory.length;
+          cmd.value = '';
+        }
+      }
+    });
+
+    connect();
+  </script>
+</body>
+</html>

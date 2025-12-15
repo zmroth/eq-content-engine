@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>EQ MUD - Live Server Bridge</title>
+  <style>
+    body {
+      background: #0a0a0a;
+      color: #00ff00;
+      font-family: 'Courier New', monospace;
+      margin: 0;
+      padding: 20px;
+    }
+    #terminal {
+      background: #0f0f0f;
+      border: 2px solid #00ff00;
+      padding: 15px;
+      height: 600px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-size: 14px;
+    }
+    h1 {
+      color: #00ff00;
+      text-align: center;
+    }
+    .event { color: #ffff00; }
+    .npc { color: #00ffff; }
+    .player { color: #ff00ff; }
+    .system { color: #888; }
+    .death { color: #ff0000; font-weight: bold; }
+    #status {
+      text-align: center;
+      margin: 10px 0;
+      font-size: 18px;
+    }
+    .connected { color: #00ff00; }
+    .disconnected { color: #ff0000; }
+    #instructions {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      padding: 15px;
+      margin-top: 10px;
+    }
+    #instructions h3 { color: #ffff00; margin-top: 0; }
+    #instructions code {
+      background: #333;
+      padding: 2px 6px;
+      color: #00ff00;
+    }
+  </style>
+</head>
+<body>
+  <h1>EQ MUD - Live Server Bridge</h1>
+  <div id="status">Status: <span id="conn" class="disconnected">Connecting...</span></div>
+  <div id="terminal"></div>
+
+  <div id="instructions">
+    <h3>In Your EQ Client (as Alexandros):</h3>
+    <p>1. <code>#reloadquests</code> - Load the event scripts</p>
+    <p>2. <code>#zone qeynos</code> - Go to South Qeynos</p>
+    <p>3. <code>#goto 50 -100 3</code> - Teleport to Grimbar</p>
+    <p>4. <code>/target Grimbar</code> - Target the innkeeper</p>
+    <p>5. <code>/say hail</code> - Talk to him</p>
+    <p>6. <code>/say gambling</code> - Ask about the secret</p>
+    <p><br>Your actions will appear above in real-time!</p>
+  </div>
+
+  <script>
+    const terminal = document.getElementById('terminal');
+    const status = document.getElementById('conn');
+
+    function log(text, className = '') {
+      const div = document.createElement('div');
+      div.textContent = text;
+      if (className) div.className = className;
+      terminal.appendChild(div);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function connect() {
+      const ws = new WebSocket('ws://localhost:8766');
+
+      ws.onopen = () => {
+        status.textContent = 'CONNECTED - Listening for game events';
+        status.className = 'connected';
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+
+          if (data.message) {
+            let className = 'system';
+            if (data.event === 'player_say' || data.event === 'player_enter') {
+              className = 'player';
+            } else if (data.event === 'npc_say') {
+              className = 'npc';
+            } else if (data.event === 'player_death') {
+              className = 'death';
+            } else if (data.type === 'game_event') {
+              className = 'event';
+            }
+            log(data.message, className);
+          }
+        } catch {
+          log(e.data);
+        }
+      };
+
+      ws.onclose = () => {
+        status.textContent = 'DISCONNECTED - Reconnecting...';
+        status.className = 'disconnected';
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        log('\n[Connection error - is the bridge server running?]', 'system');
+        log('[Run: cd ~/eq-content-engine && npm run bridge]', 'system');
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>

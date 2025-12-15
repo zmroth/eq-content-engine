@@ -1,0 +1,38 @@
+{
+  "name": "eq-content-engine",
+  "version": "1.0.0",
+  "description": "LLM-driven content generation for EQEmu servers",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "server": "node dist/server.js",
+    "bridge": "node dist/bridge-server.js",
+    "ascii": "node dist/ascii-server.js",
+    "mud": "node dist/mud-client.js",
+    "mud:cli": "node dist/mud-client.js cli",
+    "dev": "ts-node src/index.ts",
+    "dev:mud": "ts-node src/mud-client.ts",
+    "dev:server": "ts-node src/server.ts",
+    "dev:bridge": "ts-node src/bridge-server.ts",
+    "dev:ascii": "ts-node src/ascii-server.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "ws": "^8.14.0",
+    "mysql2": "^3.6.0",
+    "dotenv": "^16.3.0",
+    "express": "^4.18.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0",
+    "@types/express": "^4.17.0",
+    "@types/uuid": "^9.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "jest": "^29.0.0",
+    "@types/jest": "^29.0.0"
+  }
+}
