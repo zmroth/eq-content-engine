@@ -72,6 +72,11 @@ export class EQClient extends EventEmitter {
   private isAutoAttacking: boolean = false;
   private characters: any[] = [];
 
+  // Deduplication flags to avoid processing repeated packets
+  private worldApproved: boolean = false;
+  private characterListReceived: boolean = false;
+  private guildsListReceived: boolean = false;
+
   constructor(options: EQClientOptions) {
     super();
     this.options = options;
@@ -362,11 +367,23 @@ export class EQClient extends EventEmitter {
   }
 
   private handleWorldPacket(opcode: number, data: Buffer): void {
-    this.emit('debug', `World packet: 0x${opcode.toString(16)} (${data.length} bytes)`);
+    // Only log non-duplicate packets
+    const isDuplicate = (
+      (opcode === WorldOpcodes.OP_ApproveWorld && this.worldApproved) ||
+      (opcode === WorldOpcodes.OP_SendCharInfo && this.characterListReceived) ||
+      (opcode === WorldOpcodes.OP_GuildsList && this.guildsListReceived)
+    );
+
+    if (!isDuplicate) {
+      this.emit('debug', `World packet: 0x${opcode.toString(16)} (${data.length} bytes)`);
+    }
 
     switch (opcode) {
       case WorldOpcodes.OP_ApproveWorld:
-        this.emit('status', 'World server approved login');
+        if (!this.worldApproved) {
+          this.worldApproved = true;
+          this.emit('status', 'World server approved login');
+        }
         break;
 
       case WorldOpcodes.OP_LogServer:
@@ -378,7 +395,10 @@ export class EQClient extends EventEmitter {
         break;
 
       case WorldOpcodes.OP_SendCharInfo:
-        this.handleCharacterList(data);
+        if (!this.characterListReceived) {
+          this.characterListReceived = true;
+          this.handleCharacterList(data);
+        }
         break;
 
       case WorldOpcodes.OP_ExpansionInfo:
@@ -386,7 +406,10 @@ export class EQClient extends EventEmitter {
         break;
 
       case WorldOpcodes.OP_GuildsList:
-        this.emit('debug', 'Received guilds list');
+        if (!this.guildsListReceived) {
+          this.guildsListReceived = true;
+          this.emit('debug', 'Received guilds list');
+        }
         break;
 
       case WorldOpcodes.OP_ZoneServerInfo:
@@ -401,6 +424,9 @@ export class EQClient extends EventEmitter {
   private handleCharacterList(data: Buffer): void {
     // Parse character list
     this.emit('debug', `Character list data: ${data.length} bytes`);
+
+    // Emit raw data for debugging
+    this.emit('rawCharacterList', data);
 
     try {
       const characters = Packets.decodeCharacterList(data);
@@ -419,8 +445,36 @@ export class EQClient extends EventEmitter {
   }
 
   private handleZoneServerInfo(data: Buffer): void {
-    // Contains zone server IP/port
-    // TODO: Parse and connect to zone
+    // ZoneServerInfo_Struct from eq_packet_structs.h
+    // Contains IP address and port for zone server connection
+    if (data.length < 130) {
+      this.emit('debug', `ZoneServerInfo too short: ${data.length} bytes`);
+      return;
+    }
+
+    const pb = new Packets.PacketBuffer(data);
+    let ip = pb.readString(128).replace(/\0/g, ''); // IP address as string
+    const port = pb.readUInt16LE();
+
+    this.emit('debug', `Zone server info: ${ip}:${port}`);
+    
+    // Override Docker internal IPs with localhost (ports are exposed via Docker)
+    if (ip.startsWith('172.') || ip.startsWith('10.') || ip.startsWith('192.168.')) {
+      this.emit('debug', `Overriding Docker internal IP ${ip} with 127.0.0.1`);
+      ip = '127.0.0.1';
+    }
+    
+    this.emit('zoneServerInfo', { ip, port });
+
+    // Auto-connect to zone server
+    this.connectToZone(ip, port).catch(err => {
+      this.emit('error', `Failed to connect to zone: ${err.message}`);
+    });
+  }
+
+  // Get the list of characters (for external access)
+  getCharacters(): any[] {
+    return this.characters;
   }
 
   // ============= Zone Server =============
@@ -429,9 +483,13 @@ export class EQClient extends EventEmitter {
     if (!this.worldSession) throw new Error('Not connected to world');
 
     this.characterName = characterName;
+    this.emit('status', `Sending EnterWorld for: ${characterName}`);
+    this.emit('debug', `OP_EnterWorld opcode: 0x${WorldOpcodes.OP_EnterWorld.toString(16)}`);
 
     const enterWorld = Packets.encodeEnterWorld(characterName);
+    this.emit('debug', `EnterWorld packet size: ${enterWorld.length} bytes`);
     this.worldSession.send(WorldOpcodes.OP_EnterWorld, enterWorld);
+    this.emit('status', 'EnterWorld packet sent, waiting for zone server info...');
   }
 
   async connectToZone(host: string, port: number): Promise<void> {
@@ -442,6 +500,21 @@ export class EQClient extends EventEmitter {
 
     await this.zoneSession.connect();
     this.emit('status', 'Connected to zone server');
+
+    // Send zone entry packet with character name
+    this.sendZoneEntry();
+  }
+
+  private sendZoneEntry(): void {
+    if (!this.zoneSession || !this.characterName) return;
+
+    // ClientZoneEntry_Struct: 4 bytes unknown + 64 bytes name = 68 bytes
+    const pb = new Packets.PacketBuffer(68);
+    pb.writeUInt32LE(0); // unknown00
+    pb.writeString(this.characterName, 64);
+
+    this.emit('status', `Sending zone entry for: ${this.characterName}`);
+    this.zoneSession.send(ZoneOpcodes.OP_ZoneEntry, pb.getBuffer());
   }
 
   private setupZoneHandlers(): void {
@@ -453,6 +526,14 @@ export class EQClient extends EventEmitter {
 
     this.zoneSession.on('error', (err) => {
       this.emit('error', `Zone session error: ${err.message}`);
+    });
+
+    this.zoneSession.on('debug', (msg) => {
+      this.emit('debug', `[ZONE] ${msg}`);
+    });
+
+    this.zoneSession.on('disconnected', () => {
+      this.emit('status', 'Disconnected from zone server');
     });
   }
 

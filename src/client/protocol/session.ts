@@ -274,18 +274,34 @@ export class EQSession extends EventEmitter {
       decoded = this.decodePacket(data);
     }
 
-    // Check for compression
-    if (decoded[0] === 0x5a) {
+    // Check for zlib compression - common headers are 0x5a or 0x78
+    // 0x78 is the default zlib compression header
+    // 0x5a (ASCII 'Z') is also used as a compression marker
+    if (decoded[0] === 0x5a || decoded[0] === 0x78) {
       // Compressed with zlib
       try {
-        decoded = zlib.inflateSync(decoded.slice(1));
+        // For 0x5a, skip the marker byte; for 0x78, include it (it's part of zlib header)
+        const zlibData = decoded[0] === 0x5a ? decoded.slice(1) : decoded;
+        decoded = zlib.inflateSync(zlibData);
       } catch (e) {
-        this.emit('debug', 'Failed to decompress packet');
+        // Not actually compressed, or decompression failed
+        // Try to process as regular session packet
+        if (data[0] === 0x00 || data[1] < 0x20) {
+          // Looks like session layer data
+          // Avoid infinite recursion by not calling handlePacket on the same data
+          return;
+        }
+        this.emit('debug', `Failed to decompress packet: ${(e as Error).message}`);
         return;
       }
+    } else {
+      // Not compressed, but if first byte isn't 0x00, this isn't a session packet
+      // Avoid infinite recursion
+      this.emit('debug', `Unknown encoded packet format: 0x${data[0].toString(16)}`);
+      return;
     }
 
-    // Process as if it's session layer
+    // Process the decompressed data as session layer
     this.handlePacket(decoded);
   }
 
@@ -327,14 +343,27 @@ export class EQSession extends EventEmitter {
     // Send ACK
     this.sendAck(sequence);
 
-    // Check sequence
-    if (sequence !== this.sequenceIn) {
-      // Out of order - request resend
+    // Calculate sequence difference (handling wrap-around)
+    const diff = (sequence - this.sequenceIn) & 0xFFFF;
+    
+    // If sequence is way ahead (but not wrapped around), accept it and update sequenceIn
+    // This handles cases where packets were dropped or arrived out of order
+    if (diff === 0) {
+      // Expected sequence - process normally
+      this.sequenceIn = (this.sequenceIn + 1) & 0xFFFF;
+    } else if (diff < 1000) {
+      // Ahead of expected but within reasonable range - accept and skip gap
+      this.emit('debug', `Accepting packet ahead of sequence: got ${sequence}, expected ${this.sequenceIn}, gap=${diff}`);
+      this.sequenceIn = (sequence + 1) & 0xFFFF;
+    } else if (diff > 64000) {
+      // This is actually behind us (wrapped around) - likely retransmission, ignore
+      this.emit('debug', `Ignoring old packet: seq ${sequence}, current ${this.sequenceIn}`);
+      return;
+    } else {
+      // Way out of range - something weird, log but try to process
       this.emit('debug', `Out of order packet: got ${sequence}, expected ${this.sequenceIn}`);
       return;
     }
-
-    this.sequenceIn = (this.sequenceIn + 1) & 0xFFFF;
 
     // Extract application packet
     const appData = data.slice(4);
@@ -345,43 +374,118 @@ export class EQSession extends EventEmitter {
   private fragmentTotalSize: number = 0;
   private fragmentData: Buffer[] = [];
   private fragmentSequenceStart: number = -1;
+  private completedFragmentSequences: Set<number> = new Set();  // Track completed sequences to ignore retransmits
   private fragmentExpectedSequence: number = 0;
 
   private handleFragment(data: Buffer): void {
     if (data.length < 4) return;
 
-    const sequence = data.readUInt16BE(2);
+    // Check for compressed fragment: session_opcode(2) + 0x5a + 0x78...
+    // 0x5a is EQ's compression marker, 0x78 is zlib header
+    if (data.length >= 4 && data[2] === 0x5a && data[3] === 0x78) {
+      try {
+        const compressed = data.slice(3); // Skip session opcode and 0x5a marker
+        const decompressed = zlib.inflateSync(compressed);
 
-    // Send ACK
+        // Decompressed format: [seq_BE 2 bytes][fragment_data...]
+        if (decompressed.length < 2) return;
+
+        const sequence = decompressed.readUInt16BE(0);
+        const fragmentData = decompressed.slice(2);
+
+        // ACK the sequence
+        this.sendAck(sequence);
+
+        // Handle as fragment piece
+        if (this.fragmentTotalSize === 0 && sequence === 1) {
+          // First fragment - read total size from first 4 bytes of data
+          // Format: [total_size_BE 4 bytes][actual_data...]
+          if (fragmentData.length >= 4) {
+            this.fragmentTotalSize = fragmentData.readUInt32BE(0);
+            this.fragmentSequenceStart = sequence;
+            this.fragmentExpectedSequence = sequence;
+            this.fragmentData = [fragmentData.slice(4)];
+            this.emit('debug', `Compressed fragment start: seq=${sequence}, total=${this.fragmentTotalSize}`);
+          }
+        } else if (this.fragmentTotalSize > 0) {
+          // Subsequent fragment
+          this.fragmentData.push(fragmentData);
+          this.fragmentExpectedSequence = sequence;
+
+          // Check if complete
+          const currentSize = this.fragmentData.reduce((sum, f) => sum + f.length, 0);
+          if (currentSize >= this.fragmentTotalSize) {
+            const complete = Buffer.concat(this.fragmentData);
+            const totalSize = this.fragmentTotalSize;
+            this.emit('debug', `Compressed fragment complete: ${this.fragmentData.length} parts, ${totalSize} bytes`);
+
+            // Reset state
+            this.fragmentTotalSize = 0;
+            this.fragmentData = [];
+            this.fragmentSequenceStart = -1;
+            this.fragmentExpectedSequence = 0;
+
+            // Process the complete app packet
+            this.processAppPacket(complete.slice(0, totalSize));
+          }
+        } else if (sequence === 0 || fragmentData.length > 4) {
+          // Standalone compressed packet (no fragments)
+          this.emit('debug', `Standalone compressed: seq=${sequence}, ${fragmentData.length} bytes`);
+          this.processAppPacket(fragmentData);
+        }
+      } catch (e) {
+        this.emit('debug', `Decompress error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    // Handle 0xa5 uncompressed marker
+    if (data.length >= 3 && data[2] === 0xa5) {
+      const sequence = 0; // Uncompressed packets may not have sequence
+      this.sendAck(sequence);
+      const appData = data.slice(3);
+      this.processAppPacket(appData);
+      return;
+    }
+
+    // Normal uncompressed fragment (no 0x5a/0xa5 marker)
+    const sequence = data.readUInt16BE(2);
+    if (this.completedFragmentSequences.has(sequence)) return;
     this.sendAck(sequence);
 
-    // Check if this is the first fragment (has total_size at offset 4)
-    if (this.fragmentTotalSize === 0) {
-      // First fragment
-      if (data.length < 8) return;
-      this.fragmentTotalSize = data.readUInt32BE(4);
+    const potentialTotalSize = data.length >= 8 ? data.readUInt32BE(4) : 0;
+    const isFirstFragment = potentialTotalSize > 0 && potentialTotalSize < 1000000;
+
+    if (this.fragmentTotalSize === 0 && isFirstFragment) {
+      this.fragmentTotalSize = potentialTotalSize;
       this.fragmentSequenceStart = sequence;
       this.fragmentExpectedSequence = sequence;
-      this.fragmentData = [data.slice(8)]; // Data starts at offset 8 for first fragment
+      this.sequenceIn = (sequence + 1) & 0xFFFF;
+      this.fragmentData = [data.slice(8)];
+      this.emit('debug', `Fragment start: seq=${sequence}, total=${this.fragmentTotalSize}`);
+    } else if (this.fragmentTotalSize > 0) {
+      this.fragmentData.push(data.slice(4));
+      this.fragmentExpectedSequence = sequence;
+      this.sequenceIn = (sequence + 1) & 0xFFFF;
     } else {
-      // Subsequent fragment - check sequence
-      if (sequence !== this.fragmentExpectedSequence) {
-        this.emit('debug', `Fragment out of order: got ${sequence}, expected ${this.fragmentExpectedSequence}`);
-        // Store it anyway but mark the sequence
-      }
-      this.fragmentData.push(data.slice(4)); // Data starts at offset 4 for subsequent fragments
+      return;
     }
-    this.fragmentExpectedSequence = (this.fragmentExpectedSequence + 1) & 0xFFFF;
 
-    // Check if complete
     const currentSize = this.fragmentData.reduce((sum, f) => sum + f.length, 0);
     if (currentSize >= this.fragmentTotalSize) {
       const complete = Buffer.concat(this.fragmentData);
       const totalSize = this.fragmentTotalSize;
-      // Reset fragment state
+      this.emit('debug', `Fragment complete: ${this.fragmentData.length} parts, ${totalSize} bytes`);
+
+      for (let s = this.fragmentSequenceStart; ; s = (s + 1) & 0xFFFF) {
+        this.completedFragmentSequences.add(s);
+        if (s === this.fragmentExpectedSequence) break;
+      }
+
       this.fragmentTotalSize = 0;
       this.fragmentData = [];
       this.fragmentSequenceStart = -1;
+      this.fragmentExpectedSequence = 0;
       this.processAppPacket(complete.slice(0, totalSize));
     }
   }

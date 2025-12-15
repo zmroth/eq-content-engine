@@ -47,18 +47,19 @@ export const WorldOpcodes = {
   OP_RandomNameGenerator: 0x79c5,
   OP_ApproveName: 0x3ea6,      // Updated
   OP_WorldClientReady: 0x7d23,
-  OP_ZoneServerInfo: 0x72bf,
+  OP_ZoneServerInfo: 0x61b6,  // ShowEQ 10/27/05
   OP_CharInventory: 0x5394,
   OP_PlayerProfile: 0x75df,
 };
 
 export const ZoneOpcodes = {
-  // Zone entry
-  OP_ZoneEntry: 0x5820,
+  // Zone entry - opcodes from patch_Titanium.conf
+  OP_ZoneEntry: 0x7213,      // ShowEQ 10/27/05
   OP_PlayerProfile: 0x6922,
   OP_NewZone: 0x0920,
   OP_ZoneSpawns: 0x0fa1,
-  OP_ReqClientSpawn: 0x396f,
+  OP_ReqNewZone: 0x7ac5,     // ShowEQ 10/27/05
+  OP_ReqClientSpawn: 0x0322, // ShowEQ 10/27/05
   OP_SpawnAppearance: 0x0f1d,
   OP_ClientReady: 0x56cf,
 

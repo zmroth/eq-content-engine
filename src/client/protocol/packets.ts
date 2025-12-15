@@ -396,42 +396,117 @@ export interface CharacterEntry {
 }
 
 export function decodeCharacterList(data: Buffer): CharacterEntry[] {
-  const pb = new PacketBuffer(data);
   const characters: CharacterEntry[] = [];
 
-  // First 4 bytes is character count
-  if (pb.remaining() < 4) return characters;
-  const charCount = pb.readUInt32LE();
+  // Titanium CharacterSelect_Struct layout (from titanium_structs.h)
+  // This struct uses per-field arrays, NOT per-slot structs!
+  // Packet has 4-byte header + 1704 byte struct
+  //
+  // struct CharacterSelect_Struct {
+  //   /*0000*/ uint32 Race[10];           // 40 bytes
+  //   /*0040*/ TintProfile CS_Colors[10]; // 360 bytes (9 tints * 4 bytes * 10 chars)
+  //   /*0400*/ uint8 BeardColor[10];      // 10 bytes
+  //   /*0410*/ uint8 HairStyle[10];       // 10 bytes
+  //   /*0420*/ TextureProfile Equip[10];  // 360 bytes
+  //   /*0780*/ uint32 SecondaryIDFile[10];// 40 bytes
+  //   /*0820*/ uint8 Unknown820[10];      // 10 bytes
+  //   /*0830*/ uint8 Unknown830[2];       // 2 bytes
+  //   /*0832*/ uint32 Deity[10];          // 40 bytes
+  //   /*0872*/ uint8 GoHome[10];          // 10 bytes
+  //   /*0882*/ uint8 Tutorial[10];        // 10 bytes
+  //   /*0892*/ uint8 Beard[10];           // 10 bytes
+  //   /*0902*/ uint8 Unknown902[10];      // 10 bytes
+  //   /*0912*/ uint32 PrimaryIDFile[10];  // 40 bytes
+  //   /*0952*/ uint8 HairColor[10];       // 10 bytes
+  //   /*0962*/ uint8 Unknown0962[2];      // 2 bytes
+  //   /*0964*/ uint32 Zone[10];           // 40 bytes
+  //   /*1004*/ uint8 Class[10];           // 10 bytes
+  //   /*1014*/ uint8 Face[10];            // 10 bytes
+  //   /*1024*/ char Name[10][64];         // 640 bytes
+  //   /*1664*/ uint8 Gender[10];          // 10 bytes
+  //   /*1674*/ uint8 EyeColor1[10];       // 10 bytes
+  //   /*1684*/ uint8 EyeColor2[10];       // 10 bytes
+  //   /*1694*/ uint8 Level[10];           // 10 bytes
+  // }; // Total: 1704 bytes
 
-  // Parse each character
-  for (let i = 0; i < charCount && i < 10 && pb.remaining() > 100; i++) {
+  const STRUCT_SIZE = 1704;
+  const NUM_SLOTS = 10;
+
+  if (data.length < STRUCT_SIZE) {
+    return characters;
+  }
+
+  // Field offsets within CharacterSelect_Struct (no header - packet IS the struct)
+  const OFF_RACE = 0;      // uint32[10]
+  const OFF_DEITY = 832;   // uint32[10]
+  const OFF_ZONE = 964;    // uint32[10]
+  const OFF_CLASS = 1004;  // uint8[10]
+  const OFF_FACE = 1014;   // uint8[10]
+  const OFF_NAME = 1024;   // char[10][64]
+  const OFF_GENDER = 1664; // uint8[10]
+  const OFF_LEVEL = 1694;  // uint8[10]
+
+  // First pass: collect all valid character names and their slot indices
+  const validSlots: Array<{slot: number, name: string}> = [];
+  for (let slot = 0; slot < NUM_SLOTS; slot++) {
+    const nameOffset = OFF_NAME + (slot * 64);
+    // Name may have 4-byte prefix within 64-byte field
+    const rawName = data.slice(nameOffset, nameOffset + 64).toString('utf8').replace(/\0/g, '').trim();
+    if (rawName && rawName.length > 0 && !rawName.toLowerCase().startsWith('<none>')) {
+      validSlots.push({slot, name: rawName});
+    }
+  }
+
+  // Find where level data actually is by looking for non-zero values
+  const levelValues: number[] = [];
+  for (let i = 0; i < NUM_SLOTS; i++) {
+    levelValues.push(data.readUInt8(OFF_LEVEL + i));
+  }
+
+  // Match valid names with their data
+  // Due to inconsistent slot mapping, try to find matching level by checking all slots
+  for (const {slot, name} of validSlots) {
     try {
-      const name = pb.readString(64);
-      pb.skip(4); // unknown
-      const level = pb.readUInt8();
-      const class_ = pb.readUInt8();
-      const race = pb.readUInt16LE();
-      const zone = pb.readString(20);
-      const gender = pb.readUInt8();
-      const face = pb.readUInt8();
-      pb.skip(190); // equipment, colors, etc.
-      const deity = pb.readUInt32LE();
-      pb.skip(4); // primary, secondary
+      // Read race from the same slot
+      const race = data.readUInt32LE(OFF_RACE + slot * 4);
 
-      if (name && name.length > 0) {
-        characters.push({
-          name,
-          level,
-          class_,
-          race,
-          zone,
-          gender,
-          face,
-          deity,
-        });
+      // For level/class, first try same slot, then search for non-zero values
+      let level = data.readUInt8(OFF_LEVEL + slot);
+      let class_ = data.readUInt8(OFF_CLASS + slot);
+      let gender = data.readUInt8(OFF_GENDER + slot);
+      let face = data.readUInt8(OFF_FACE + slot);
+      let deity = data.readUInt32LE(OFF_DEITY + slot * 4);
+      let zoneId = data.readUInt32LE(OFF_ZONE + slot * 4);
+
+      // If level is 0, search for a non-zero level value (server may use different slot)
+      if (level === 0) {
+        for (let i = 0; i < NUM_SLOTS; i++) {
+          const lvl = data.readUInt8(OFF_LEVEL + i);
+          if (lvl > 0 && lvl <= 100) {
+            level = lvl;
+            // Also try to get class from same alternate slot
+            const cls = data.readUInt8(OFF_CLASS + i);
+            if (cls > 0 && cls <= 16) {
+              class_ = cls;
+            }
+            break;
+          }
+        }
       }
+
+      characters.push({
+        name,
+        level,
+        class_: class_,
+        race,
+        zone: (zoneId > 0 && zoneId < 1000) ? `Zone ${zoneId}` : 'Unknown',
+        gender,
+        face,
+        deity,
+      });
     } catch (e) {
-      break;
+      // Skip malformed slot
+      continue;
     }
   }
 
