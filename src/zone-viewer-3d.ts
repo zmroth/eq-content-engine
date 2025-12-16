@@ -52,7 +52,13 @@ function parseMapFile(filePath: string): MapData | null {
       };
 
       const allCoords = [v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z];
-      const isValid = allCoords.every(c => c > -50000 && c < 50000 && !isNaN(c));
+      // Filter out garbage triangles - valid EQ coords are typically -5000 to 5000
+      // Also filter out denormalized floats (very tiny values near zero that aren't exactly zero)
+      const isValid = allCoords.every(c =>
+        !isNaN(c) && isFinite(c) &&
+        c > -5000 && c < 5000 &&
+        (c === 0 || Math.abs(c) > 0.001)  // Filter denormalized garbage
+      );
 
       if (isValid) {
         [v1, v2, v3].forEach(v => {
