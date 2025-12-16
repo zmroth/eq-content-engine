@@ -144,7 +144,8 @@ class MUDClient {
       case 'con': case 'consider': this.consider(args); break;
       case 'attack': case 'a': this.attack(); break;
 
-      // Social
+      // Social & Interaction
+      case 'hail': case 'h': this.hail(args); break;
       case 'who': this.who(); break;
       case 'spawns': this.listSpawns(); break;
       case 'say': case "'": this.print(`${C.white}You say, "${args}"${C.reset}`); break;
@@ -183,9 +184,10 @@ class MUDClient {
     this.print(`    nearby [dist]  List spawns within distance`);
     this.print(`    n/s/e/w/u/d    Move in a direction`);
     this.print(`    walk <target>  Walk toward a target`);
-    this.print(`${C.yellow}  TARGETING & COMBAT${C.reset}`);
+    this.print(`${C.yellow}  TARGETING & INTERACTION${C.reset}`);
     this.print(`    target <name>  Target an NPC or player`);
     this.print(`    con [name]     Consider target's difficulty`);
+    this.print(`    hail [name]    Hail an NPC (starts dialogue)`);
     this.print(`    attack         Attack your target`);
     this.print(`${C.yellow}  CHARACTER${C.reset}`);
     this.print(`    stats          Show your character stats`);
@@ -217,19 +219,47 @@ class MUDClient {
   }
 
   private look(target?: string): void {
+    const pos = this.client.getPosition();
+    const getDist = (s: any) => Math.sqrt(Math.pow(s.x - pos.x, 2) + Math.pow(s.y - pos.y, 2));
+    const LOOK_RANGE = 200; // Only show spawns within 200 units
+
     if (!target) {
       this.print('\nYou look around...');
       const all = Array.from(this.spawns.values());
-      if (all.length === 0) { this.print('Nothing here.'); return; }
-      const npcs = all.filter(s => s.isNpc);
-      const pcs = all.filter(s => !s.isNpc && s.name !== this.currentCharacter);
-      if (pcs.length) this.print('Players: ' + pcs.map(p => p.name).join(', '));
-      if (npcs.length) this.print('NPCs: ' + npcs.slice(0,10).map(n => n.name).join(', ') + (npcs.length > 10 ? '...' : ''));
+      if (all.length === 0) { this.print('Nothing here yet. Zone still loading?'); return; }
+
+      // Filter to nearby spawns only
+      const nearby = all.filter(s => getDist(s) <= LOOK_RANGE);
+      const npcs = nearby.filter(s => s.isNpc).sort((a, b) => getDist(a) - getDist(b));
+      const pcs = nearby.filter(s => !s.isNpc && s.name !== this.currentCharacter);
+
+      this.print(`${C.dim}(${nearby.length} nearby, ${all.length} total in zone)${C.reset}`);
+
+      if (pcs.length) {
+        this.print(`${C.cyan}Players nearby:${C.reset} ` + pcs.map(p => p.name).join(', '));
+      }
+
+      if (npcs.length) {
+        this.print(`${C.yellow}NPCs nearby:${C.reset}`);
+        npcs.slice(0, 15).forEach(n => {
+          const dist = getDist(n).toFixed(0);
+          const conColor = this.getConColor(n.level || 1);
+          this.print(`  ${conColor}${n.name}${C.reset} (${dist} away)`);
+        });
+        if (npcs.length > 15) this.print(`  ${C.dim}...and ${npcs.length - 15} more${C.reset}`);
+      } else if (all.length > 0) {
+        this.print(`${C.dim}No NPCs within ${LOOK_RANGE} units. Try 'nearby 500' for more.${C.reset}`);
+      }
     } else {
+      // Look at specific target
       const spawn = Array.from(this.spawns.values()).find(s => s.name.toLowerCase().includes(target.toLowerCase()));
       if (spawn) {
-        this.print('\n' + spawn.name);
-        this.print('  Level: ' + (spawn.level || '?'));
+        const dist = getDist(spawn).toFixed(0);
+        const conColor = this.getConColor(spawn.level || 1);
+        this.print(`\n${conColor}${spawn.name}${C.reset}`);
+        this.print(`  Level: ${spawn.level || '?'}`);
+        this.print(`  Distance: ${dist} units`);
+        this.print(`  Location: (${spawn.x.toFixed(0)}, ${spawn.y.toFixed(0)}, ${spawn.z.toFixed(0)})`);
       } else this.print('Not found: ' + target);
     }
   }
@@ -422,6 +452,17 @@ class MUDClient {
     this.print(`${conColor}${spawn.name} ${conText}${C.reset} (Level ${spawn.level || '?'})`);
   }
 
+  private getConColor(targetLevel: number): string {
+    const levelDiff = targetLevel - this.playerLevel;
+    if (levelDiff >= 5) return C.red;
+    if (levelDiff >= 3) return C.red;
+    if (levelDiff >= 1) return C.yellow;
+    if (levelDiff >= -2) return C.white;
+    if (levelDiff >= -5) return C.blue;
+    if (levelDiff >= -10) return C.green;
+    return C.dim;
+  }
+
   private attack(): void {
     const target = this.spawns.get(this.targetId);
     if (!target) {
@@ -431,6 +472,58 @@ class MUDClient {
     // Simulated attack - would need actual combat packets
     this.print(`${C.red}You begin attacking ${target.name}!${C.reset}`);
     this.print(`${C.dim}(Combat system not yet connected to server)${C.reset}`);
+  }
+
+  private hail(name?: string): void {
+    let spawn: any;
+    if (name) {
+      spawn = Array.from(this.spawns.values()).find(s =>
+        s.name.toLowerCase().includes(name.toLowerCase()) && s.isNpc
+      );
+      if (spawn) this.targetId = spawn.id;
+    } else {
+      spawn = this.spawns.get(this.targetId);
+    }
+
+    if (!spawn) {
+      this.print('Who do you want to hail? Try: hail <name>');
+      return;
+    }
+
+    if (!spawn.isNpc) {
+      this.print(`${C.cyan}You wave at ${spawn.name}.${C.reset}`);
+      return;
+    }
+
+    // Display hail interaction
+    this.print(`\n${C.white}You say, "Hail, ${spawn.name}"${C.reset}`);
+
+    // Generate NPC response based on their role
+    const npcName = spawn.name.replace(/_/g, ' ');
+    const level = spawn.level || 1;
+
+    // Check for merchant-type names
+    const isMerchant = /merchant|vendor|trader|shopkeep|supplier/i.test(npcName);
+    const isGuard = /guard|watchman|soldier|protector|sentinel/i.test(npcName);
+    const isGuildmaster = /guildmaster|trainer|master/i.test(npcName);
+
+    let response: string;
+    if (isMerchant) {
+      response = `Greetings, ${this.currentCharacter}! Would you like to see my [wares]?`;
+    } else if (isGuard) {
+      response = `Move along, citizen. Keep the peace in this area.`;
+    } else if (isGuildmaster) {
+      response = `Ah, a seeker of knowledge! I can teach you many [skills] if you are ready to learn.`;
+    } else if (level < 10) {
+      response = `Hello there, traveler.`;
+    } else if (level < 30) {
+      response = `Well met, ${this.currentCharacter}. What brings you to these parts?`;
+    } else {
+      response = `I sense great potential in you, ${this.currentCharacter}. Perhaps we can [assist] each other.`;
+    }
+
+    this.print(`${C.yellow}${npcName} says, "${response}"${C.reset}`);
+    this.print(`${C.dim}(NPC dialogue is simulated - quest system not yet connected)${C.reset}`);
   }
 
   private showStats(): void {
