@@ -340,10 +340,19 @@ function generateHTML(mapData: MapData, zoneName: string): string {
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
 
-  <script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
     // Geometry data
     const vertices = new Float32Array(${JSON.stringify(vertices)});
     const indices = new Uint32Array(${JSON.stringify(indices)});
@@ -382,7 +391,7 @@ function generateHTML(mapData: MapData, zoneName: string): string {
       container.appendChild(renderer.domElement);
 
       // Controls
-      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls = new OrbitControls(camera, renderer.domElement);
       controls.target.set(center.x, center.z, -center.y);
       controls.enableDamping = true;
       controls.dampingFactor = 0.05;
