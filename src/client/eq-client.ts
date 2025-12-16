@@ -730,38 +730,157 @@ export class EQClient extends EventEmitter {
   }
 
   private handleZoneSpawns(data: Buffer): void {
-    // ZoneSpawns contains multiple spawn structs
-    // Use string extraction to find NPC names
-    this.emit('debug', `ZoneSpawns: ${data.length} bytes of spawn data`);
-    this.extractNPCNames(data);
+    // ZoneSpawns contains multiple Spawn_Struct (385 bytes each)
+    // Titanium Spawn_Struct layout:
+    // offset 7: name[64]
+    // offset 83: NPC flag (0=player, 1=npc)
+    // offset 86: curHp, offset 87: maxHp
+    // offset 94-110: bit-packed coordinates (x, y, z, heading)
+    // offset 151: level
+    // offset 284: race (uint32)
+    // offset 292: lastName[32]
+    // offset 331: class_
+    // offset 340: spawnId (uint32)
+
+    const SPAWN_SIZE = 385;
+    this.emit('debug', `ZoneSpawns: ${data.length} bytes, ~${Math.floor(data.length / SPAWN_SIZE)} spawns`);
+
+    let count = 0;
+    let offset = 0;
+
+    while (offset + SPAWN_SIZE <= data.length) {
+      try {
+        const spawn = this.parseSpawnStruct(data, offset);
+        if (spawn && spawn.name.length >= 3) {
+          // Clean up name
+          const cleanName = spawn.name.replace(/0+$/, '').replace(/_/g, ' ').trim();
+
+          if (cleanName.length >= 3 && !this.seenSpawnNames.has(cleanName)) {
+            this.seenSpawnNames.add(cleanName);
+
+            const entity: Entity = {
+              id: spawn.spawnId || this.seenSpawnNames.size,
+              name: cleanName,
+              lastName: spawn.lastName.replace(/_/g, ' ').trim(),
+              x: spawn.x,
+              y: spawn.y,
+              z: spawn.z,
+              heading: spawn.heading,
+              level: spawn.level,
+              race: spawn.race,
+              class_: spawn.class_,
+              hp: spawn.curHp,
+              maxHp: spawn.maxHp,
+              isNpc: spawn.isNpc,
+              isPet: false,
+            };
+
+            this.entities.set(entity.id, entity);
+            this.emit('spawn', entity);
+            count++;
+          }
+        }
+      } catch (e) {
+        // Skip malformed spawn
+      }
+      offset += SPAWN_SIZE;
+    }
+
+    // If struct parsing didn't work, fall back to string extraction
+    if (count === 0) {
+      this.extractNPCNamesFallback(data);
+    } else {
+      this.emit('debug', `ZoneSpawns: Parsed ${count} spawns with coordinates`);
+    }
   }
 
-  private extractNPCNames(data: Buffer): void {
-    // Scan for readable ASCII strings that look like NPC names
-    // NPC names follow patterns like: "Guard_Urius", "a_rodent", "Merchant_Name"
+  private parseSpawnStruct(data: Buffer, offset: number): any {
+    // Read name at offset 7 (64 bytes)
+    const nameBuffer = data.slice(offset + 7, offset + 7 + 64);
+    const name = nameBuffer.toString('utf8').replace(/\0/g, '').trim();
+
+    // Validate name looks reasonable
+    if (!name || !name.match(/^[a-zA-Z_]/)) {
+      return null;
+    }
+
+    // Read NPC flag at offset 83
+    const npcFlag = data.readUInt8(offset + 83);
+
+    // Read HP at offsets 86, 87
+    const curHp = data.readUInt8(offset + 86);
+    const maxHp = data.readUInt8(offset + 87);
+
+    // Read bit-packed coordinates
+    // offset 94: [deltaHeading:10][x:19][padding:3]
+    // offset 98: [y:19][animation:10][padding:3]
+    // offset 102: [z:19][deltaY:13]
+    // offset 106: [deltaX:13][heading:12][padding:7]
+
+    const coordData94 = data.readUInt32LE(offset + 94);
+    const coordData98 = data.readUInt32LE(offset + 98);
+    const coordData102 = data.readUInt32LE(offset + 102);
+    const coordData106 = data.readUInt32LE(offset + 106);
+
+    // Extract 19-bit signed x (bits 10-28 of offset 94)
+    let x = (coordData94 >> 10) & 0x7FFFF;
+    if (x & 0x40000) x = x - 0x80000; // Sign extend
+
+    // Extract 19-bit signed y (bits 0-18 of offset 98)
+    let y = coordData98 & 0x7FFFF;
+    if (y & 0x40000) y = y - 0x80000;
+
+    // Extract 19-bit signed z (bits 0-18 of offset 102)
+    let z = coordData102 & 0x7FFFF;
+    if (z & 0x40000) z = z - 0x80000;
+
+    // Extract 12-bit unsigned heading (bits 13-24 of offset 106)
+    const heading = (coordData106 >> 13) & 0xFFF;
+
+    // Read level at offset 151
+    const level = data.readUInt8(offset + 151);
+
+    // Read race at offset 284 (uint32)
+    const race = data.readUInt32LE(offset + 284);
+
+    // Read lastName at offset 292 (32 bytes)
+    const lastNameBuffer = data.slice(offset + 292, offset + 292 + 32);
+    const lastName = lastNameBuffer.toString('utf8').replace(/\0/g, '').trim();
+
+    // Read class at offset 331
+    const class_ = data.readUInt8(offset + 331);
+
+    // Read spawnId at offset 340
+    const spawnId = data.readUInt32LE(offset + 340);
+
+    return {
+      name, lastName, x, y, z, heading,
+      level, race, class_, curHp, maxHp, spawnId,
+      isNpc: npcFlag === 1,
+    };
+  }
+
+  private extractNPCNamesFallback(data: Buffer): void {
+    // Fallback: scan for readable ASCII strings that look like NPC names
     let count = 0;
     let i = 0;
 
     while (i < data.length - 4) {
-      // Look for start of a potential name (letter)
       const c0 = data[i];
       if ((c0 >= 0x41 && c0 <= 0x5a) || (c0 >= 0x61 && c0 <= 0x7a)) {
-        // Read until null byte (proper string termination)
         let end = i;
         let hasUnderscore = false;
         let valid = true;
 
         while (end < data.length && end - i < 64) {
           const c = data[end];
-          if (c === 0) break; // Null terminator
-
-          // Only accept letters, digits, underscore
+          if (c === 0) break;
           if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a)) {
             // letter OK
           } else if (c >= 0x30 && c <= 0x39) {
             // digit OK
           } else if (c === 0x5f) {
-            hasUnderscore = true; // underscore
+            hasUnderscore = true;
           } else {
             valid = false;
             break;
@@ -769,18 +888,14 @@ export class EQClient extends EventEmitter {
           end++;
         }
 
-        // Name must be: null-terminated, >= 5 chars, contain underscore or start capital
         const len = end - i;
         if (valid && len >= 5 && len <= 40 && end < data.length && data[end] === 0) {
           const name = data.slice(i, end).toString('utf8');
           const startsCapital = c0 >= 0x41 && c0 <= 0x5a;
 
-          // Must have underscore (like NPC names) or be capitalized
           if (hasUnderscore || startsCapital) {
-            // Clean up: remove trailing 0s, replace underscores with spaces
             let cleanName = name.replace(/0+$/, '').replace(/_/g, ' ').trim();
 
-            // Skip if too short after cleanup or already seen
             if (cleanName.length >= 4 && !this.seenSpawnNames.has(cleanName)) {
               this.seenSpawnNames.add(cleanName);
 
@@ -804,7 +919,7 @@ export class EQClient extends EventEmitter {
     }
 
     if (count > 0) {
-      this.emit('debug', `ZoneSpawns: Extracted ${count} new NPCs (${this.seenSpawnNames.size} total)`);
+      this.emit('debug', `ZoneSpawns fallback: Extracted ${count} NPCs`);
     }
   }
 

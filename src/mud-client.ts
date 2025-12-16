@@ -104,6 +104,9 @@ class MUDClient {
       case 'who': this.who(); break;
       case 'spawns': this.listSpawns(); break;
       case 'target': case 'tar': this.target(args); break;
+      case 'loc': case 'location': this.showLocation(); break;
+      case 'map': this.showMap(); break;
+      case 'nearby': this.showNearby(parseInt(args) || 500); break;
       case 'say': this.print('You say, "' + args + '"'); break;
       case 'shout': this.print('You shout, "' + args + '"'); break;
       case 'ooc': this.print('[OOC] You: ' + args); break;
@@ -114,7 +117,10 @@ class MUDClient {
   private showHelp(): void {
     this.print('\n=== MUD Commands ===');
     this.print('  play <name>  - Enter world with character');
-    this.print('  look         - Look around');
+    this.print('  look [name]  - Look around or at target');
+    this.print('  loc          - Show your location (x, y, z)');
+    this.print('  map          - Show ASCII zone map');
+    this.print('  nearby [dist]- List spawns within distance');
     this.print('  who          - List players');
     this.print('  spawns       - List all spawns');
     this.print('  target <n>   - Target a spawn');
@@ -179,6 +185,114 @@ class MUDClient {
     const spawn = Array.from(this.spawns.values()).find(s => s.name.toLowerCase().includes(name.toLowerCase()));
     if (spawn) { this.targetId = spawn.id; this.print('Targeting ' + spawn.name); }
     else this.print('Not found: ' + name);
+  }
+
+  private showLocation(): void {
+    const pos = this.client.getPosition();
+    this.print(`\nYour location: (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`);
+    this.print(`Heading: ${pos.heading}`);
+
+    if (this.targetId) {
+      const target = this.spawns.get(this.targetId);
+      if (target) {
+        const dx = target.x - pos.x;
+        const dy = target.y - pos.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        this.print(`Distance to ${target.name}: ${dist.toFixed(0)} units`);
+      }
+    }
+  }
+
+  private showNearby(maxDist: number): void {
+    const pos = this.client.getPosition();
+    const all = Array.from(this.spawns.values());
+
+    // Calculate distances
+    const withDist = all.map(s => ({
+      ...s,
+      dist: Math.sqrt(Math.pow(s.x - pos.x, 2) + Math.pow(s.y - pos.y, 2))
+    })).filter(s => s.dist <= maxDist && s.dist > 0)
+      .sort((a, b) => a.dist - b.dist);
+
+    this.print(`\n=== Nearby (within ${maxDist} units) ===`);
+    if (withDist.length === 0) {
+      this.print('Nobody nearby.');
+    } else {
+      withDist.slice(0, 15).forEach(s => {
+        const dir = this.getDirection(pos.x, pos.y, s.x, s.y);
+        this.print(`  ${s.name} - ${s.dist.toFixed(0)} units ${dir}`);
+      });
+      if (withDist.length > 15) this.print(`  ...and ${withDist.length - 15} more`);
+    }
+  }
+
+  private getDirection(x1: number, y1: number, x2: number, y2: number): string {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+
+    if (angle >= -22.5 && angle < 22.5) return 'East';
+    if (angle >= 22.5 && angle < 67.5) return 'NE';
+    if (angle >= 67.5 && angle < 112.5) return 'North';
+    if (angle >= 112.5 && angle < 157.5) return 'NW';
+    if (angle >= 157.5 || angle < -157.5) return 'West';
+    if (angle >= -157.5 && angle < -112.5) return 'SW';
+    if (angle >= -112.5 && angle < -67.5) return 'South';
+    if (angle >= -67.5 && angle < -22.5) return 'SE';
+    return '';
+  }
+
+  private showMap(): void {
+    const all = Array.from(this.spawns.values()).filter(s => s.x !== 0 || s.y !== 0);
+    if (all.length === 0) {
+      this.print('No spawn coordinates available.');
+      return;
+    }
+
+    const pos = this.client.getPosition();
+
+    // Calculate bounds
+    const xs = all.map(s => s.x);
+    const ys = all.map(s => s.y);
+    const minX = Math.min(...xs, pos.x);
+    const maxX = Math.max(...xs, pos.x);
+    const minY = Math.min(...ys, pos.y);
+    const maxY = Math.max(...ys, pos.y);
+
+    // Create ASCII map (60x30 chars)
+    const width = 60;
+    const height = 25;
+    const map: string[][] = [];
+    for (let y = 0; y < height; y++) {
+      map[y] = new Array(width).fill('.');
+    }
+
+    // Scale coordinates to map
+    const scaleX = (width - 1) / (maxX - minX || 1);
+    const scaleY = (height - 1) / (maxY - minY || 1);
+
+    // Plot spawns
+    all.forEach(s => {
+      const mx = Math.floor((s.x - minX) * scaleX);
+      const my = height - 1 - Math.floor((s.y - minY) * scaleY);
+      if (mx >= 0 && mx < width && my >= 0 && my < height) {
+        map[my][mx] = s.isNPC ? '*' : 'P';
+      }
+    });
+
+    // Plot player position
+    const px = Math.floor((pos.x - minX) * scaleX);
+    const py = height - 1 - Math.floor((pos.y - minY) * scaleY);
+    if (px >= 0 && px < width && py >= 0 && py < height) {
+      map[py][px] = '@';
+    }
+
+    // Print map
+    this.print('\n╔' + '═'.repeat(width) + '╗');
+    map.forEach(row => this.print('║' + row.join('') + '║'));
+    this.print('╚' + '═'.repeat(width) + '╝');
+    this.print(`Legend: @ = You, * = NPC, P = Player`);
+    this.print(`Bounds: X(${minX.toFixed(0)} to ${maxX.toFixed(0)}) Y(${minY.toFixed(0)} to ${maxY.toFixed(0)})`);
   }
 
   async start(): Promise<void> {
