@@ -240,6 +240,7 @@ export class EQSession extends EventEmitter {
         break;
 
       case SessionOpcodes.OP_Ack:
+        this.emit('debug', `OP_Ack raw: ${data.toString('hex').substring(0, 20)}`);
         this.handleAck(data);
         break;
 
@@ -370,12 +371,17 @@ export class EQSession extends EventEmitter {
     this.processAppPacket(appData);
   }
 
-  // Fragment reassembly state
+  // Fragment reassembly state (for uncompressed fragments)
   private fragmentTotalSize: number = 0;
   private fragmentData: Buffer[] = [];
   private fragmentSequenceStart: number = -1;
   private completedFragmentSequences: Set<number> = new Set();  // Track completed sequences to ignore retransmits
   private fragmentExpectedSequence: number = 0;
+
+  // Compressed fragment reassembly state (for zone server compressed packets)
+  private compressedFragmentTotal: number = 0;
+  private compressedFragmentData: Buffer[] = [];
+  private compressedFragmentSeq: number = -1;
 
   private handleFragment(data: Buffer): void {
     if (data.length < 4) return;
@@ -396,42 +402,60 @@ export class EQSession extends EventEmitter {
         // ACK the sequence
         this.sendAck(sequence);
 
-        // Handle as fragment piece
-        if (this.fragmentTotalSize === 0 && sequence === 1) {
-          // First fragment - read total size from first 4 bytes of data
-          // Format: [total_size_BE 4 bytes][actual_data...]
+        // Handle compressed fragment piece
+        // Zone sends large structs (like PlayerProfile ~19KB) as multiple fragments
+        // The sequence number may not be contiguous - zone uses its own numbering
+        // First fragment: [seq 2][total_size 4 BE][app_data...]
+        // Subsequent fragments: [seq 2][more_data...]
+
+        // Try to detect first fragment by looking for valid totalSize header
+        // Key insight: fragmented packets have totalSize > data in first fragment
+        // If totalSize <= current data, it's a standalone packet
+        if (this.compressedFragmentTotal === 0) {
+          // No active assembly - check if this is a first fragment with size header
           if (fragmentData.length >= 4) {
-            this.fragmentTotalSize = fragmentData.readUInt32BE(0);
-            this.fragmentSequenceStart = sequence;
-            this.fragmentExpectedSequence = sequence;
-            this.fragmentData = [fragmentData.slice(4)];
-            this.emit('debug', `Compressed fragment start: seq=${sequence}, total=${this.fragmentTotalSize}`);
+            const potentialSize = fragmentData.readUInt32BE(0);
+            const remainingData = fragmentData.length - 4; // Data after size header
+
+            // A fragmented packet has totalSize > remainingData (needs more fragments)
+            // And totalSize should be reasonable (< 100KB)
+            if (potentialSize > remainingData && potentialSize < 100000) {
+              // This is a first fragment - totalSize is larger than what we have
+              this.compressedFragmentTotal = potentialSize;
+              this.compressedFragmentData = [fragmentData.slice(4)];
+              this.compressedFragmentSeq = sequence;
+              this.emit('debug', `Compressed fragment start: seq=${sequence}, totalSize=${potentialSize}, firstData=${remainingData}bytes`);
+            } else {
+              // Standalone packet - either totalSize fits in one fragment or is invalid
+              // Treat entire fragmentData as app packet (first 2 bytes are opcode)
+              this.processAppPacket(fragmentData);
+            }
+          } else {
+            // Too short for size header - standalone
+            this.processAppPacket(fragmentData);
           }
-        } else if (this.fragmentTotalSize > 0) {
-          // Subsequent fragment
-          this.fragmentData.push(fragmentData);
-          this.fragmentExpectedSequence = sequence;
+        } else {
+          // Active assembly - add this fragment
+          this.compressedFragmentData.push(fragmentData);
+          this.compressedFragmentSeq = sequence;
 
           // Check if complete
-          const currentSize = this.fragmentData.reduce((sum, f) => sum + f.length, 0);
-          if (currentSize >= this.fragmentTotalSize) {
-            const complete = Buffer.concat(this.fragmentData);
-            const totalSize = this.fragmentTotalSize;
-            this.emit('debug', `Compressed fragment complete: ${this.fragmentData.length} parts, ${totalSize} bytes`);
+          const currentSize = this.compressedFragmentData.reduce((sum, f) => sum + f.length, 0);
+          this.emit('debug', `Fragment added: seq=${sequence}, parts=${this.compressedFragmentData.length}, current=${currentSize}/${this.compressedFragmentTotal}`);
 
-            // Reset state
-            this.fragmentTotalSize = 0;
-            this.fragmentData = [];
-            this.fragmentSequenceStart = -1;
-            this.fragmentExpectedSequence = 0;
+          if (currentSize >= this.compressedFragmentTotal) {
+            const complete = Buffer.concat(this.compressedFragmentData);
+            const totalSize = this.compressedFragmentTotal;
+            this.emit('debug', `Compressed fragment complete: ${this.compressedFragmentData.length} parts, ${totalSize} bytes`);
 
-            // Process the complete app packet
+            // Reset fragment state
+            this.compressedFragmentTotal = 0;
+            this.compressedFragmentData = [];
+            this.compressedFragmentSeq = -1;
+
+            // Process the complete app packet (first 2 bytes are opcode)
             this.processAppPacket(complete.slice(0, totalSize));
           }
-        } else if (sequence === 0 || fragmentData.length > 4) {
-          // Standalone compressed packet (no fragments)
-          this.emit('debug', `Standalone compressed: seq=${sequence}, ${fragmentData.length} bytes`);
-          this.processAppPacket(fragmentData);
         }
       } catch (e) {
         this.emit('debug', `Decompress error: ${(e as Error).message}`);
@@ -493,6 +517,7 @@ export class EQSession extends EventEmitter {
   private handleAck(data: Buffer): void {
     if (data.length < 4) return;
     const sequence = data.readUInt16BE(2);
+    this.emit('debug', `Received ACK for seq=${sequence}`);
     this.pendingPackets.delete(sequence);
   }
 
@@ -749,9 +774,11 @@ export class EQSession extends EventEmitter {
           if (pending.retries < 5) {
             pending.retries++;
             pending.timestamp = now;
+            this.emit('debug', `Retrying packet seq=${seq} (attempt ${pending.retries})`);
             this.sendRaw(pending.data);
           } else {
             // Too many retries, disconnect
+            this.emit('debug', `Giving up on seq=${seq} after 5 retries`);
             this.emit('error', new Error('Connection lost - too many retries'));
             this.disconnect();
           }

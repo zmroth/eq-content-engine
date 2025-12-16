@@ -76,6 +76,7 @@ export class EQClient extends EventEmitter {
   private worldApproved: boolean = false;
   private characterListReceived: boolean = false;
   private guildsListReceived: boolean = false;
+  private seenSpawnNames: Set<string> = new Set();
 
   constructor(options: EQClientOptions) {
     super();
@@ -483,6 +484,11 @@ export class EQClient extends EventEmitter {
     if (!this.worldSession) throw new Error('Not connected to world');
 
     this.characterName = characterName;
+    // Reset zone entry state
+    this.playerProfileReceived = false;
+    this.newZoneReceived = false;
+    this.reqClientSpawnSent = false;
+    this.clientReadySent = false;
     this.emit('status', `Sending EnterWorld for: ${characterName}`);
     this.emit('debug', `OP_EnterWorld opcode: 0x${WorldOpcodes.OP_EnterWorld.toString(16)}`);
 
@@ -538,9 +544,20 @@ export class EQClient extends EventEmitter {
   }
 
   private handleZonePacket(opcode: number, data: Buffer): void {
+    // Log ALL zone packets for debugging
+    this.emit('debug', `Zone opcode: 0x${opcode.toString(16)} (${data.length} bytes)`);
+
     switch (opcode) {
+      case ZoneOpcodes.OP_PlayerProfile:
+        this.handlePlayerProfile(data);
+        break;
+
       case ZoneOpcodes.OP_NewZone:
         this.handleNewZone(data);
+        break;
+
+      case ZoneOpcodes.OP_ZoneSpawns:
+        this.handleZoneSpawns(data);
         break;
 
       case ZoneOpcodes.OP_NewSpawn:
@@ -576,11 +593,70 @@ export class EQClient extends EventEmitter {
         break;
 
       default:
-        this.emit('debug', `Zone packet: 0x${opcode.toString(16)} (${data.length} bytes)`);
+        // Log unknown opcodes with first 32 bytes for analysis
+        const hex = data.slice(0, Math.min(32, data.length)).toString('hex');
+        this.emit('debug', `Zone unknown: 0x${opcode.toString(16)} (${data.length} bytes) [${hex}]`);
     }
   }
 
+  private playerProfileReceived: boolean = false;
+
+  private handlePlayerProfile(data: Buffer): void {
+    // Prevent duplicate processing (retransmits)
+    if (this.playerProfileReceived) {
+      return;
+    }
+    this.playerProfileReceived = true;
+
+    // PlayerProfile is a large struct (~19KB) with character stats
+    // Titanium PlayerProfile_Struct layout from titanium_structs.h:
+    // offset 0: checksum (uint32)
+    // offset 4: gender (uint32)
+    // offset 8: race (uint32)
+    // offset 12: class_ (uint32)
+    // offset 20: level (uint8)
+    // offset 12940: name (char[64])
+    // offset 13004: last_name (char[32])
+
+    if (data.length < 13036) {
+      this.emit('debug', `PlayerProfile too short: ${data.length} bytes`);
+      return;
+    }
+
+    const gender = data.readUInt32LE(4);
+    const race = data.readUInt32LE(8);
+    const class_ = data.readUInt32LE(12);
+    const level = data.readUInt8(20);
+    const name = data.slice(12940, 13004).toString('utf8').replace(/\0/g, '').trim();
+    const lastName = data.slice(13004, 13036).toString('utf8').replace(/\0/g, '').trim();
+
+    this.emit('debug', `PlayerProfile: ${name} Level ${level} ${this.getClassName(class_)} (${data.length} bytes)`);
+    this.emit('playerProfile', { name, level, class_, race, gender, raw: data });
+    this.emit('status', `Player profile loaded: ${name} - Level ${level} ${this.getClassName(class_)}`);
+
+    // Send ReqClientSpawn IMMEDIATELY after receiving PlayerProfile
+    // The server waits for this before sending NewZone and spawns
+    setTimeout(() => this.sendReqClientSpawn(), 100);
+  }
+
+  private getClassName(classId: number): string {
+    const classes: Record<number, string> = {
+      1: 'Warrior', 2: 'Cleric', 3: 'Paladin', 4: 'Ranger',
+      5: 'Shadow Knight', 6: 'Druid', 7: 'Monk', 8: 'Bard',
+      9: 'Rogue', 10: 'Shaman', 11: 'Necromancer', 12: 'Wizard',
+      13: 'Magician', 14: 'Enchanter', 15: 'Beastlord', 16: 'Berserker',
+    };
+    return classes[classId] || `Class${classId}`;
+  }
+
+  private newZoneReceived: boolean = false;
+  private reqClientSpawnSent: boolean = false;
+  private clientReadySent: boolean = false;
+
   private handleNewZone(data: Buffer): void {
+    if (this.newZoneReceived) return; // Ignore retransmits
+    this.newZoneReceived = true;
+
     const zone = Packets.decodeNewZone(data);
     this.currentZone = {
       shortName: zone.zoneShortName,
@@ -593,6 +669,30 @@ export class EQClient extends EventEmitter {
 
     this.emit('zoneEnter', this.currentZone);
     this.emit('status', `Entered ${zone.zoneLongName}`);
+  }
+
+  private sendReqClientSpawn(): void {
+    if (this.reqClientSpawnSent || !this.zoneSession) return;
+    this.reqClientSpawnSent = true;
+
+    this.emit('debug', 'Sending OP_ReqClientSpawn to request zone content');
+    // ReqClientSpawn is an empty packet with just the opcode
+    const emptyPacket = Buffer.alloc(0);
+    this.zoneSession.send(ZoneOpcodes.OP_ReqClientSpawn, emptyPacket);
+
+    // Schedule ClientReady after a short delay to allow spawns to arrive
+    setTimeout(() => this.sendClientReady(), 2000);
+  }
+
+  private sendClientReady(): void {
+    if (this.clientReadySent || !this.zoneSession) return;
+    this.clientReadySent = true;
+
+    this.emit('debug', 'Sending OP_ClientReady');
+    // ClientReady is also an empty packet
+    const emptyPacket = Buffer.alloc(0);
+    this.zoneSession.send(ZoneOpcodes.OP_ClientReady, emptyPacket);
+    this.emit('status', 'Zone entry complete - ready to play');
   }
 
   private handleNewSpawn(data: Buffer): void {
@@ -626,6 +726,85 @@ export class EQClient extends EventEmitter {
       this.emit('spawn', entity);
     } catch (e) {
       this.emit('debug', `Failed to parse spawn: ${e}`);
+    }
+  }
+
+  private handleZoneSpawns(data: Buffer): void {
+    // ZoneSpawns contains multiple spawn structs
+    // Use string extraction to find NPC names
+    this.emit('debug', `ZoneSpawns: ${data.length} bytes of spawn data`);
+    this.extractNPCNames(data);
+  }
+
+  private extractNPCNames(data: Buffer): void {
+    // Scan for readable ASCII strings that look like NPC names
+    // NPC names follow patterns like: "Guard_Urius", "a_rodent", "Merchant_Name"
+    let count = 0;
+    let i = 0;
+
+    while (i < data.length - 4) {
+      // Look for start of a potential name (letter)
+      const c0 = data[i];
+      if ((c0 >= 0x41 && c0 <= 0x5a) || (c0 >= 0x61 && c0 <= 0x7a)) {
+        // Read until null byte (proper string termination)
+        let end = i;
+        let hasUnderscore = false;
+        let valid = true;
+
+        while (end < data.length && end - i < 64) {
+          const c = data[end];
+          if (c === 0) break; // Null terminator
+
+          // Only accept letters, digits, underscore
+          if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a)) {
+            // letter OK
+          } else if (c >= 0x30 && c <= 0x39) {
+            // digit OK
+          } else if (c === 0x5f) {
+            hasUnderscore = true; // underscore
+          } else {
+            valid = false;
+            break;
+          }
+          end++;
+        }
+
+        // Name must be: null-terminated, >= 5 chars, contain underscore or start capital
+        const len = end - i;
+        if (valid && len >= 5 && len <= 40 && end < data.length && data[end] === 0) {
+          const name = data.slice(i, end).toString('utf8');
+          const startsCapital = c0 >= 0x41 && c0 <= 0x5a;
+
+          // Must have underscore (like NPC names) or be capitalized
+          if (hasUnderscore || startsCapital) {
+            // Clean up: remove trailing 0s, replace underscores with spaces
+            let cleanName = name.replace(/0+$/, '').replace(/_/g, ' ').trim();
+
+            // Skip if too short after cleanup or already seen
+            if (cleanName.length >= 4 && !this.seenSpawnNames.has(cleanName)) {
+              this.seenSpawnNames.add(cleanName);
+
+              const entity: Entity = {
+                id: this.seenSpawnNames.size,
+                name: cleanName,
+                lastName: '', x: 0, y: 0, z: 0, heading: 0,
+                level: 1, race: 0, class_: 0,
+                hp: 100, maxHp: 100, isNpc: true, isPet: false,
+              };
+              this.entities.set(entity.id, entity);
+              this.emit('spawn', entity);
+              count++;
+            }
+          }
+        }
+        i = end + 1;
+      } else {
+        i++;
+      }
+    }
+
+    if (count > 0) {
+      this.emit('debug', `ZoneSpawns: Extracted ${count} new NPCs (${this.seenSpawnNames.size} total)`);
     }
   }
 

@@ -53,15 +53,16 @@ export const WorldOpcodes = {
 };
 
 export const ZoneOpcodes = {
-  // Zone entry - opcodes from patch_Titanium.conf
+  // Zone entry - opcodes verified against actual server traffic
   OP_ZoneEntry: 0x7213,      // ShowEQ 10/27/05
-  OP_PlayerProfile: 0x6922,
+  OP_PlayerProfile: 0x75df,  // Same as world - server sends same opcode
   OP_NewZone: 0x0920,
-  OP_ZoneSpawns: 0x0fa1,
+  OP_ZoneSpawns: 0x2e78,     // Actual opcode from server (contains NPC spawn data)
   OP_ReqNewZone: 0x7ac5,     // ShowEQ 10/27/05
   OP_ReqClientSpawn: 0x0322, // ShowEQ 10/27/05
   OP_SpawnAppearance: 0x0f1d,
   OP_ClientReady: 0x56cf,
+  OP_DoorInfo: 0x4c24,       // Door spawn data
 
   // Movement
   OP_ClientUpdate: 0x14cb,
