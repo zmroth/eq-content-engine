@@ -1,79 +1,49 @@
 # EQ Content Engine
 
-A TypeScript headless client and LLM-powered content generation engine for EverQuest Emulator (EQEmu) servers.
+The dopest headless EverQuest client - **play the whole game without a GUI!**
 
-## Overview
-
-EQ Content Engine provides two main capabilities:
-
-### 1. LLM-Based Content Generator (Beta)
-
-Generate EverQuest content using natural language descriptions powered by AI:
-
-- **NPC Generation** - Describe an NPC in plain English, get complete database-ready stats, dialogue, and Lua quest scripts
-- **Automatic Spawning** - Generate and spawn NPCs directly into your EQEmu database
-- **Dialogue & Quests** - AI-generated dialogue trees and Lua scripts for NPC interactions
-- **OpenRouter Integration** - Uses Claude, GPT-4, or other models via OpenRouter API
+## Quick Start
 
 ```bash
-eq> generate A wise old wizard who studies ancient magic in his tower
+cd /home/zachroth/eq-content-engine
 
-Generated NPC:
-  Name: Aldric the Sage
-  Level: 45
-  Race: Human
-  Class: Wizard
-  Dialogue: "Ah, a visitor... Tell me, do you seek knowledge of the [arcane arts]?"
+# Launch the MUD client
+npx ts-node src/mud-client.ts
+
+# Then type: play 1 (or play <charactername>)
 ```
 
-### 2. MUD-Style Read-Only Client
+## What This Does
 
-A text-based interface for connecting to EQEmu servers without the game client:
+A complete text-based interface for EverQuest using real server data:
 
-- **Headless Protocol** - Full Titanium-era UDP session layer implementation
-- **Character Viewing** - See your character list and server status
-- **CLI or Browser** - Use via terminal or web-based interface
-- **Read-Only Safe** - Observer mode for server monitoring and testing
-
-```
-╔═══════════════════════════════════════════════════════════════════╗
-║     ███████╗ ██████╗ ███████╗███╗   ███╗██╗   ██╗██████╗          ║
-║     ██╔════╝██╔═══██╗██╔════╝████╗ ████║██║   ██║██╔══██╗         ║
-║     █████╗  ██║   ██║█████╗  ██╔████╔██║██║   ██║██║  ██║         ║
-║              H E A D L E S S   E Q   C L I E N T                  ║
-╚═══════════════════════════════════════════════════════════════════╝
-> connect admin password
-Connecting to 127.0.0.1:5998...
-Authentication successful!
-```
+- **Full Zone Entry** - Connect to Login → World → Zone servers
+- **Real Spawn Data** - See every NPC with actual coordinates
+- **Interactive Maps** - ASCII maps in terminal + HTML maps in browser
+- **Zone Geometry** - Parse .map files for walls/floors
+- **EQ-Style Commands** - /con, /target, /loc, /who, /say, etc.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    EQ Content Engine (TypeScript)                   │
-├─────────────────────────────────────────────────────────────────────┤
-│  CONTENT GENERATION                                                 │
-│  ├── src/api/openrouter.ts      # LLM API client (OpenRouter)      │
-│  ├── src/api/spire.ts           # Spire API integration            │
-│  ├── src/api/database.ts        # Direct MySQL queries             │
-│  ├── src/content/npc-generator  # NPC generation from descriptions │
-│  └── src/prompts/               # LLM prompt templates             │
-├─────────────────────────────────────────────────────────────────────┤
-│  HEADLESS CLIENT                                                    │
-│  ├── src/client/eq-client.ts    # Main EQ client class             │
-│  ├── src/client/protocol/                                          │
-│  │   ├── session.ts             # UDP reliable session layer       │
-│  │   ├── packets.ts             # Packet encode/decode             │
-│  │   ├── opcodes.ts             # Titanium opcodes                 │
-│  │   └── crypto.ts              # DES-CBC for login                │
-│  └── src/client/mud/            # MUD text interface               │
-├─────────────────────────────────────────────────────────────────────┤
-│  INTERFACES                                                         │
-│  ├── src/index.ts               # Content generator CLI            │
-│  ├── src/mud-client.ts          # MUD client (CLI + WebSocket)     │
-│  └── mud-client.html            # Browser-based MUD interface      │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       MUD Client                                 │
+│   src/mud-client.ts - Your game interface                        │
+│   Commands: look, con, target, map, say, stats, etc.             │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│                       EQ Client                                  │
+│   src/client/eq-client.ts - Titanium protocol handler            │
+│   Handles: Login → World → Zone server connections               │
+│   Parses: Spawn data, coordinates, player profile                │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│                      EQEmu Server                                │
+│   Running in Docker (akk-stack)                                  │
+│   Login: 127.0.0.1:5998 | World: 127.0.0.1:9000                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Installation

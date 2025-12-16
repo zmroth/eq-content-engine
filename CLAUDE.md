@@ -119,33 +119,59 @@ timeout 20 npx ts-node src/test-login.ts 2>&1 | grep -E "(World packet:|characte
 
 ## Key Features
 
-### 1. LLM Content Generator
+### 1. MUD Client (The Main Thing!)
+A complete text-based EverQuest experience:
+- **Full zone entry** - Login → World → Zone server chain
+- **Real spawn data** - Every NPC with actual coordinates
+- **EQ-style commands** - /con, /target, /loc, /who, /say
+- **ASCII & HTML maps** - Visualize the whole zone
+
+### 2. Zone Visualization
+- **zone-visualizer.ts** - Generates interactive HTML spawn maps
+- **map-parser.ts** - Parses .map files for zone geometry (walls/floors)
+- **In-game htmlmap command** - Generate maps while playing
+
+### 3. LLM Content Generator (Beta)
 - Generate NPCs from natural language descriptions
 - Uses OpenRouter API (Claude, GPT-4, etc.)
 - Outputs database-ready NPC stats and Lua quest scripts
-- Can auto-spawn NPCs into the database
 
-### 2. MUD Read-Only Client
-- Text-based interface to EQEmu servers
-- Connect and authenticate via Titanium protocol
-- View character lists, server status
-- CLI or browser-based (WebSocket)
+## What's Working (as of Dec 2024)
 
-## What's Working
+- ✅ Login server authentication (UDP 5998)
+- ✅ World server connection (UDP 9000)
+- ✅ **Zone server connection** (compressed packet handling)
+- ✅ **Fragment reassembly** (fixed sequence gap handling)
+- ✅ Character list retrieval
+- ✅ **Zone entry and spawn tracking**
+- ✅ **Spawn coordinates** (bit-packed 19-bit parsing)
+- ✅ **Player position tracking**
+- ✅ **ASCII maps in terminal**
+- ✅ **Interactive HTML maps**
+- ✅ **Zone geometry parsing** (.map files)
+- ✅ **Consider system** (EQ-style con colors)
+- ✅ MUD commands: look, nearby, target, con, stats, who, spawns, loc, map, htmlmap
 
-- Login server authentication (UDP 5998)
-- World server connection (UDP 9000)
-- Session negotiation and fragment reassembly
-- Character list retrieval
-- NPC generation from descriptions
-- Database insertion via Spire API
+## Not Yet Working
 
-## In Progress
+- Movement packets (n/s/e/w direction commands placeholder)
+- Combat packets (attack command placeholder)
+- Chat sending to server (say/shout/ooc only display locally)
+- Inventory display (placeholder)
+- Spell casting
 
-- Zone server connection
-- EnterWorld packet implementation
-- Full MUD command interface
-- Item and quest generation
+## How to Run
+
+```bash
+# The MUD Client (main interface)
+npx ts-node src/mud-client.ts
+
+# Generate HTML spawn map
+npx ts-node src/zone-visualizer.ts
+
+# Parse zone geometry
+npx ts-node src/map-parser.ts /path/to/zone.map
+```
 
 ## Environment Variables
 
@@ -172,13 +198,42 @@ EQ_LOGIN_PORT=5998
 MUD_WS_PORT=8768
 ```
 
+## MUD Commands (EQ-Aligned)
+
+| Command | EQ Equivalent | Description |
+|---------|---------------|-------------|
+| `play <name>` | Character Select | Enter world |
+| `look [name]` | - | Look around or examine |
+| `loc` | `/loc` | Show coordinates |
+| `target <name>` | `/target` | Target NPC/player |
+| `con [name]` | `/con` | Consider difficulty |
+| `who` | `/who` | List players |
+| `say <msg>` | `/say` | Say something |
+| `shout <msg>` | `/shout` | Shout to zone |
+| `ooc <msg>` | `/ooc` | Out-of-character |
+| `stats` | Inventory window | Show character stats |
+| `map` | In-game map | ASCII zone map |
+| `htmlmap` | - | Generate HTML map |
+| `nearby [dist]` | - | List spawns by distance |
+| `n/s/e/w/u/d` | Movement keys | Move in direction |
+
 ## Technical Notes
 
-### Fragment Reassembly
-Large packets from the server (like OP_GuildsList at 96KB) are sent as fragments:
-- First fragment: total_size at offset 4, data at offset 8
-- Subsequent fragments: data at offset 4 (no total_size)
-- All fragments share sequential sequence numbers
+### Fragment Reassembly (FIXED)
+The key fix was in fragment sequence handling. Server sends compressed fragments with non-contiguous sequence numbers (0 → 40 jump). Fixed by detecting first fragment via `potentialSize > remainingData` instead of `sequence === 0`.
+
+### Spawn Coordinate Parsing
+Titanium Spawn_Struct uses 19-bit signed coordinates packed in 32-bit fields:
+```typescript
+// X at offset 94, Y at 98, Z at 102
+let x = (data.readUInt32LE(offset + 94) >> 10) & 0x7FFFF;
+if (x & 0x40000) x = x - 0x80000; // Sign extension
+```
+
+### Zone Opcodes
+- `OP_ZoneSpawns: 0x2e78` (actual, not documented 0x0fa1)
+- Fragment opcode: `0x0d`
+- Compression marker: `0x5a` (zlib deflate)
 
 ### Session Layer
 UDP reliable session protocol:
