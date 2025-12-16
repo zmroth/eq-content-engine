@@ -630,6 +630,17 @@ export class EQClient extends EventEmitter {
     const name = data.slice(12940, 13004).toString('utf8').replace(/\0/g, '').trim();
     const lastName = data.slice(13004, 13036).toString('utf8').replace(/\0/g, '').trim();
 
+    // Extract player position from PlayerProfile (offsets 4700-4712)
+    // Note: EQ uses y,x,z order!
+    if (data.length >= 4716) {
+      const y = data.readFloatLE(4700);
+      const x = data.readFloatLE(4704);
+      const z = data.readFloatLE(4708);
+      const heading = data.readFloatLE(4712);
+      this.myPosition = { x, y, z, heading };
+      this.emit('debug', `Player position from profile: (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
+    }
+
     this.emit('debug', `PlayerProfile: ${name} Level ${level} ${this.getClassName(class_)} (${data.length} bytes)`);
     this.emit('playerProfile', { name, level, class_, race, gender, raw: data });
     this.emit('status', `Player profile loaded: ${name} - Level ${level} ${this.getClassName(class_)}`);

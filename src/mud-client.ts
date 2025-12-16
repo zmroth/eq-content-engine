@@ -58,7 +58,7 @@ class MUDClient {
 
     this.client.on('debug', (msg: string) => {
       // Show important debug messages
-      if (msg.includes('Found player')) {
+      if (msg.includes('Found player') || msg.includes('Player position')) {
         this.print(`${C.cyan}[DEBUG] ${msg}${C.reset}`);
       }
     });
@@ -322,29 +322,41 @@ class MUDClient {
     // Calculate bounds
     const xs = all.map(s => s.x);
     const ys = all.map(s => s.y);
+    const zs = all.map(s => s.z || 0);
     const minX = Math.min(...xs, pos.x);
     const maxX = Math.max(...xs, pos.x);
     const minY = Math.min(...ys, pos.y);
     const maxY = Math.max(...ys, pos.y);
+    const minZ = Math.min(...zs, pos.z);
+    const maxZ = Math.max(...zs, pos.z);
 
-    // Create ASCII map (60x30 chars)
+    // Create ASCII map (60x25 chars)
     const width = 60;
     const height = 25;
     const map: string[][] = [];
     for (let y = 0; y < height; y++) {
-      map[y] = new Array(width).fill('.');
+      map[y] = new Array(width).fill(' ');
     }
 
     // Scale coordinates to map
     const scaleX = (width - 1) / (maxX - minX || 1);
     const scaleY = (height - 1) / (maxY - minY || 1);
 
-    // Plot spawns
+    // Z-level characters: lower = . , ground = - , higher = ^
+    const getZChar = (z: number, isNpc: boolean): string => {
+      const playerZ = pos.z || 0;
+      const diff = z - playerZ;
+      if (Math.abs(diff) < 20) return isNpc ? '*' : 'o';  // Same level
+      if (diff < -20) return isNpc ? ',' : '.';  // Below (basement)
+      return isNpc ? '^' : 'A';  // Above (upstairs)
+    };
+
+    // Plot spawns with Z-level indication
     all.forEach(s => {
       const mx = Math.floor((s.x - minX) * scaleX);
       const my = height - 1 - Math.floor((s.y - minY) * scaleY);
       if (mx >= 0 && mx < width && my >= 0 && my < height) {
-        map[my][mx] = s.isNpc ? '*' : 'P';
+        map[my][mx] = getZChar(s.z || 0, s.isNpc);
       }
     });
 
@@ -355,12 +367,13 @@ class MUDClient {
       map[py][px] = '@';
     }
 
-    // Print map
-    this.print('\n╔' + '═'.repeat(width) + '╗');
-    map.forEach(row => this.print('║' + row.join('') + '║'));
-    this.print('╚' + '═'.repeat(width) + '╝');
-    this.print(`Legend: @ = You, * = NPC, P = Player`);
-    this.print(`Bounds: X(${minX.toFixed(0)} to ${maxX.toFixed(0)}) Y(${minY.toFixed(0)} to ${maxY.toFixed(0)})`);
+    // Print map with colors
+    this.print(`\n${C.cyan}╔${'═'.repeat(width)}╗${C.reset}`);
+    map.forEach(row => this.print(`${C.cyan}║${C.reset}${row.join('')}${C.cyan}║${C.reset}`));
+    this.print(`${C.cyan}╚${'═'.repeat(width)}╝${C.reset}`);
+    this.print(`${C.dim}Legend: @ You | * NPC (same floor) | ^ above | , below | o/A players${C.reset}`);
+    this.print(`${C.dim}X: ${minX.toFixed(0)} to ${maxX.toFixed(0)} | Y: ${minY.toFixed(0)} to ${maxY.toFixed(0)} | Z: ${minZ.toFixed(0)} to ${maxZ.toFixed(0)}${C.reset}`);
+    this.print(`${C.dim}Your Z: ${pos.z.toFixed(0)}${C.reset}`);
   }
 
   private consider(name?: string): void {

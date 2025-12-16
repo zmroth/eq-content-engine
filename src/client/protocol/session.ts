@@ -771,16 +771,17 @@ export class EQSession extends EventEmitter {
       const now = Date.now();
       for (const [seq, pending] of this.pendingPackets) {
         if (now - pending.timestamp > 3000) {
-          if (pending.retries < 5) {
+          if (pending.retries < 15) {  // Increased from 5 to 15 for more tolerance
             pending.retries++;
             pending.timestamp = now;
-            this.emit('debug', `Retrying packet seq=${seq} (attempt ${pending.retries})`);
+            if (pending.retries % 5 === 0) {
+              this.emit('debug', `Retrying packet seq=${seq} (attempt ${pending.retries})`);
+            }
             this.sendRaw(pending.data);
           } else {
-            // Too many retries, disconnect
-            this.emit('debug', `Giving up on seq=${seq} after 5 retries`);
-            this.emit('error', new Error('Connection lost - too many retries'));
-            this.disconnect();
+            // Too many retries - clear this one but don't disconnect immediately
+            this.pendingPackets.delete(seq);
+            this.emit('debug', `Dropped packet seq=${seq} after 15 retries`);
           }
         }
       }
