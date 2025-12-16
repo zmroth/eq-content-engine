@@ -11,6 +11,8 @@
     "ascii": "node dist/ascii-server.js",
     "mud": "node dist/mud-client.js",
     "mud:cli": "node dist/mud-client.js cli",
+    "viewer": "ts-node src/zone-viewer-3d.ts",
+    "viewer:2d": "ts-node src/map-parser.ts",
     "dev": "ts-node src/index.ts",
     "dev:mud": "ts-node src/mud-client.ts",
     "dev:server": "ts-node src/server.ts",
