@@ -51,8 +51,16 @@ class MUDClient {
       this.print('[STATUS] ' + msg);
     });
 
-    this.client.on('error', (err: Error) => {
-      this.print('[ERROR] ' + err.message);
+    this.client.on('error', (err: Error | string) => {
+      const msg = typeof err === 'string' ? err : (err?.message || String(err));
+      this.print(`${C.red}[ERROR] ${msg}${C.reset}`);
+    });
+
+    this.client.on('debug', (msg: string) => {
+      // Show important debug messages
+      if (msg.includes('Found player')) {
+        this.print(`${C.cyan}[DEBUG] ${msg}${C.reset}`);
+      }
     });
 
     this.client.on('serverList', (servers: any[]) => {
@@ -213,8 +221,8 @@ class MUDClient {
       this.print('\nYou look around...');
       const all = Array.from(this.spawns.values());
       if (all.length === 0) { this.print('Nothing here.'); return; }
-      const npcs = all.filter(s => s.isNPC);
-      const pcs = all.filter(s => !s.isNPC && s.name !== this.currentCharacter);
+      const npcs = all.filter(s => s.isNpc);
+      const pcs = all.filter(s => !s.isNpc && s.name !== this.currentCharacter);
       if (pcs.length) this.print('Players: ' + pcs.map(p => p.name).join(', '));
       if (npcs.length) this.print('NPCs: ' + npcs.slice(0,10).map(n => n.name).join(', ') + (npcs.length > 10 ? '...' : ''));
     } else {
@@ -227,7 +235,7 @@ class MUDClient {
   }
 
   private who(): void {
-    const pcs = Array.from(this.spawns.values()).filter(s => !s.isNPC);
+    const pcs = Array.from(this.spawns.values()).filter(s => !s.isNpc);
     this.print('\n=== Players ===');
     if (!pcs.length) this.print('Nobody here.');
     else pcs.forEach(p => this.print('  ' + p.name + ' Lv' + (p.level || '?')));
@@ -236,7 +244,7 @@ class MUDClient {
   private listSpawns(): void {
     const all = Array.from(this.spawns.values());
     this.print('\n=== Spawns (' + all.length + ') ===');
-    all.slice(0, 20).forEach(s => this.print('  ' + (s.isNPC ? '[NPC]' : '[PC]') + ' ' + s.name));
+    all.slice(0, 20).forEach(s => this.print('  ' + (s.isNpc ? '[NPC]' : '[PC]') + ' ' + s.name));
     if (all.length > 20) this.print('  ...and ' + (all.length - 20) + ' more');
   }
 
@@ -336,7 +344,7 @@ class MUDClient {
       const mx = Math.floor((s.x - minX) * scaleX);
       const my = height - 1 - Math.floor((s.y - minY) * scaleY);
       if (mx >= 0 && mx < width && my >= 0 && my < height) {
-        map[my][mx] = s.isNPC ? '*' : 'P';
+        map[my][mx] = s.isNpc ? '*' : 'P';
       }
     });
 
@@ -484,7 +492,7 @@ class MUDClient {
       y: s.y || 0,
       z: s.z || 0,
       level: s.level,
-      isNpc: s.isNPC,
+      isNpc: s.isNpc,
     })));
 
     const html = `<!DOCTYPE html>

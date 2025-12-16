@@ -717,10 +717,13 @@ export class EQClient extends EventEmitter {
 
       this.entities.set(spawn.spawnId, entity);
 
-      // Check if this is us
-      if (spawn.name === this.characterName) {
+      // Check if this is us (case-insensitive, handle underscores)
+      const spawnNameLower = spawn.name.toLowerCase().replace(/_/g, ' ').trim();
+      const charNameLower = this.characterName.toLowerCase().replace(/_/g, ' ').trim();
+      if (spawnNameLower === charNameLower) {
         this.mySpawnId = spawn.spawnId;
         this.myPosition = { x: spawn.x, y: spawn.y, z: spawn.z, heading: spawn.heading };
+        this.emit('debug', `Found player spawn: ${spawn.name} at (${spawn.x}, ${spawn.y}, ${spawn.z})`);
       }
 
       this.emit('spawn', entity);
@@ -776,6 +779,16 @@ export class EQClient extends EventEmitter {
             };
 
             this.entities.set(entity.id, entity);
+
+            // Check if this is us (player spawn)
+            const spawnNameLower = cleanName.toLowerCase();
+            const charNameLower = this.characterName.toLowerCase();
+            if (spawnNameLower === charNameLower && (spawn.x !== 0 || spawn.y !== 0 || spawn.z !== 0)) {
+              this.mySpawnId = entity.id;
+              this.myPosition = { x: spawn.x, y: spawn.y, z: spawn.z, heading: spawn.heading };
+              this.emit('debug', `Found player in zone spawns: ${cleanName} at (${spawn.x}, ${spawn.y}, ${spawn.z})`);
+            }
+
             this.emit('spawn', entity);
             count++;
           }
@@ -853,10 +866,11 @@ export class EQClient extends EventEmitter {
     // Read spawnId at offset 340
     const spawnId = data.readUInt32LE(offset + 340);
 
+    // NPC flag: 0 = player, 1+ = NPC (merchants, guards, etc have different values)
     return {
       name, lastName, x, y, z, heading,
       level, race, class_, curHp, maxHp, spawnId,
-      isNpc: npcFlag === 1,
+      isNpc: npcFlag !== 0,  // Any non-zero value = NPC
     };
   }
 

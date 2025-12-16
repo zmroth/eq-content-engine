@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>EverQuest Zone Map</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #e0e0e0;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    #container {
+      display: flex;
+      height: 100vh;
+    }
+    #map-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+    #canvas {
+      position: absolute;
+      cursor: grab;
+    }
+    #canvas:active { cursor: grabbing; }
+    #sidebar {
+      width: 320px;
+      background: rgba(0,0,0,0.5);
+      padding: 20px;
+      overflow-y: auto;
+      border-left: 1px solid #333;
+    }
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 15px;
+      color: #00d4ff;
+      text-shadow: 0 0 10px rgba(0,212,255,0.5);
+    }
+    h2 {
+      font-size: 1rem;
+      margin: 15px 0 10px;
+      color: #ffd700;
+    }
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid #333;
+    }
+    .stat-label { color: #888; }
+    .stat-value { color: #fff; font-weight: bold; }
+    #spawn-list {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .spawn-item {
+      padding: 8px;
+      margin: 4px 0;
+      background: rgba(255,255,255,0.05);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .spawn-item:hover {
+      background: rgba(0,212,255,0.2);
+      transform: translateX(5px);
+    }
+    .spawn-name { font-weight: bold; }
+    .spawn-coords { font-size: 0.8rem; color: #888; }
+    #tooltip {
+      position: absolute;
+      background: rgba(0,0,0,0.9);
+      border: 1px solid #00d4ff;
+      padding: 10px;
+      border-radius: 5px;
+      pointer-events: none;
+      display: none;
+      z-index: 1000;
+      max-width: 200px;
+    }
+    #search {
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 15px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid #444;
+      border-radius: 5px;
+      color: #fff;
+    }
+    #search:focus {
+      outline: none;
+      border-color: #00d4ff;
+    }
+    .controls {
+      margin: 15px 0;
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      padding: 8px 15px;
+      background: #00d4ff;
+      border: none;
+      border-radius: 5px;
+      color: #000;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:hover { background: #00b8e6; }
+    #minimap {
+      position: absolute;
+      bottom: 20px;
+      right: 340px;
+      width: 150px;
+      height: 150px;
+      background: rgba(0,0,0,0.7);
+      border: 1px solid #00d4ff;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="map-container">
+      <canvas id="canvas"></canvas>
+      <canvas id="minimap"></canvas>
+    </div>
+    <div id="sidebar">
+      <h1>🗺️ Zone Map</h1>
+
+      <input type="text" id="search" placeholder="Search spawns...">
+
+      <div class="controls">
+        <button onclick="resetView()">Reset View</button>
+        <button onclick="toggleLabels()">Toggle Labels</button>
+      </div>
+
+      <h2>📊 Statistics</h2>
+      <div class="stat">
+        <span class="stat-label">Total Spawns</span>
+        <span class="stat-value" id="total-spawns">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">NPCs</span>
+        <span class="stat-value" id="npc-count">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Zone Bounds X</span>
+        <span class="stat-value" id="bounds-x">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Zone Bounds Y</span>
+        <span class="stat-value" id="bounds-y">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Zone Bounds Z</span>
+        <span class="stat-value" id="bounds-z">-</span>
+      </div>
+
+      <h2>📍 Spawns</h2>
+      <div id="spawn-list"></div>
+    </div>
+  </div>
+
+  <div id="tooltip"></div>
+
+  <script>
+    const spawns = [{"name":"Fibble Quickfingers","x":400,"y":-800,"z":24,"level":15,"isNpc":true,"class_":41,"race":11},{"name":"Grimbar","x":400,"y":-800,"z":24,"level":12,"isNpc":true,"class_":41,"race":8},{"name":"Vaelindra Whisperwind","x":0,"y":0,"z":24,"level":45,"isNpc":true,"class_":14,"race":5},{"name":"Gemcrafter Anuk","x":-1432,"y":1240,"z":37,"level":25,"isNpc":true,"class_":41,"race":1},{"name":"Port Authority Officer005","x":776,"y":3168,"z":-393,"level":99,"isNpc":true,"class_":1,"race":240},{"name":"Port Authority Officer004","x":-2648,"y":1968,"z":54,"level":99,"isNpc":true,"class_":1,"race":240},{"name":"Port Authority Officer003","x":824,"y":560,"z":-292,"level":99,"isNpc":true,"class_":1,"race":240},{"name":"Port Authority Officer002","x":488,"y":-1208,"z":-183,"level":99,"isNpc":true,"class_":1,"race":240},{"name":"Port Authority Officer001","x":496,"y":-1416,"z":30,"level":99,"isNpc":true,"class_":1,"race":240},{"name":"Port Authority Officer","x":496,"y":-1416,"z":-201,"level":99,"isNpc":true,"class_":1,"race":240},{"name":"Golden Maiden","x":2204,"y":-1018,"z":-155,"level":50,"isNpc":true,"class_":1,"race":72},{"name":"Raffy Conticede","x":-3928,"y":-2256,"z":30,"level":22,"isNpc":true,"class_":41,"race":71},{"name":"Faren","x":960,"y":-1384,"z":30,"level":3,"isNpc":true,"class_":1,"race":1},{"name":"Ghul Rustem","x":-224,"y":-2456,"z":48,"level":34,"isNpc":true,"class_":41,"race":71},{"name":"Exterminator Rasmon","x":-3264,"y":1856,"z":30,"level":30,"isNpc":true,"class_":1,"race":1},{"name":"Menkes Tabolet","x":-672,"y":-2592,"z":41,"level":14,"isNpc":true,"class_":9,"race":7},{"name":"Iala Lenard","x":-1184,"y":1416,"z":22,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Byjan Timbokker","x":-1384,"y":1576,"z":22,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Wrin Liltin","x":-1625,"y":771,"z":22,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Gash Flockwalker","x":-696,"y":2944,"z":27,"level":8,"isNpc":true,"class_":6,"race":7},{"name":"Wylin Dodmil","x":-3536,"y":624,"z":-192,"level":35,"isNpc":true,"class_":1,"race":1},{"name":"Ginleen Harltop","x":-3512,"y":56,"z":254,"level":61,"isNpc":true,"class_":20,"race":1},{"name":"Edvard Tommels","x":-2384,"y":-1888,"z":30,"level":35,"isNpc":true,"class_":6,"race":1},{"name":"Warehnn Awlne","x":-288,"y":-80,"z":30,"level":65,"isNpc":true,"class_":7,"race":1},{"name":"Ebon Strongbear","x":-4088,"y":600,"z":254,"level":61,"isNpc":true,"class_":20,"race":1},{"name":"Runethar Hamest","x":-4160,"y":-1200,"z":54,"level":61,"isNpc":true,"class_":22,"race":1},{"name":"Vansted Rohenga","x":-3592,"y":-1536,"z":49,"level":61,"isNpc":true,"class_":21,"race":1},{"name":"Bisdlo Ravtahm","x":-4200,"y":-2064,"z":30,"level":26,"isNpc":true,"class_":41,"race":71},{"name":"Nostahla Westfend","x":-72,"y":496,"z":30,"level":61,"isNpc":true,"class_":31,"race":1},{"name":"Gahna Salbeen","x":-1752,"y":32,"z":29,"level":30,"isNpc":true,"class_":41,"race":71},{"name":"Ton Firepride","x":-2616,"y":1384,"z":30,"level":30,"isNpc":true,"class_":41,"race":71},{"name":"Guard Calik","x":-2320,"y":-308,"z":30,"level":9,"isNpc":true,"class_":1,"race":71},{"name":"Chesgard Sydwen","x":-3959,"y":-2255,"z":30,"level":61,"isNpc":true,"class_":22,"race":1},{"name":"Trumpy Irontoe","x":-3063,"y":-1454,"z":4,"level":5,"isNpc":true,"class_":9,"race":8},{"name":"Lisdon Trekka","x":-3864,"y":-1912,"z":30,"level":35,"isNpc":true,"class_":41,"race":71},{"name":"Talym Shoontar","x":-2216,"y":-1848,"z":35,"level":15,"isNpc":true,"class_":1,"race":2},{"name":"Bogen Chazel","x":-4136,"y":-2072,"z":30,"level":32,"isNpc":true,"class_":41,"race":71},{"name":"Lanhern Firepride","x":-2512,"y":1520,"z":30,"level":20,"isNpc":true,"class_":41,"race":71},{"name":"Guard Forbly","x":-936,"y":328,"z":30,"level":5,"isNpc":true,"class_":1,"race":71},{"name":"Guard Phaeton","x":-664,"y":592,"z":30,"level":5,"isNpc":true,"class_":1,"race":71},{"name":"Den Magason","x":424,"y":-888,"z":-122,"level":3,"isNpc":true,"class_":9,"race":1},{"name":"an investigator","x":-320,"y":1304,"z":14,"level":10,"isNpc":true,"class_":1,"race":1},{"name":"Lord Mrallon","x":-3640,"y":-1160,"z":38,"level":60,"isNpc":true,"class_":3,"race":1},{"name":"Xantomo Salmor","x":-3560,"y":1288,"z":30,"level":50,"isNpc":true,"class_":1,"race":1},{"name":"a rodent019","x":-263,"y":-507,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent018","x":-3751,"y":1143,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent017","x":-2664,"y":1168,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent016","x":-2791,"y":216,"z":22,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent015","x":-970,"y":-2714,"z":63,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent014","x":-582,"y":-2467,"z":11,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent013","x":-66,"y":118,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent012","x":-2305,"y":-429,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"Anehan Treol","x":-1048,"y":-1536,"z":30,"level":23,"isNpc":true,"class_":8,"race":1},{"name":"a rodent011","x":-3429,"y":1705,"z":9,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent01","x":-3066,"y":-1317,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent009","x":-3072,"y":128,"z":21,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent008","x":-1045,"y":-1789,"z":18,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent007","x":-943,"y":-28,"z":9,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"Fesse Bontex","x":-4088,"y":-2048,"z":30,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Miltiades Tal`Azroth","x":-3440,"y":-1416,"z":49,"level":61,"isNpc":true,"class_":22,"race":1},{"name":"Marlin Bizmite","x":496,"y":96,"z":-128,"level":25,"isNpc":true,"class_":1,"race":1},{"name":"Christian Hidken","x":-3448,"y":-2280,"z":27,"level":65,"isNpc":true,"class_":63,"race":7},{"name":"a rodent","x":-3073,"y":-965,"z":9,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent001","x":-1806,"y":1147,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent002","x":-1869,"y":1168,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent003","x":-2745,"y":2395,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent004","x":-1771,"y":2014,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent005","x":-2090,"y":2528,"z":2,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"a rodent006","x":-1669,"y":1659,"z":10,"level":1,"isNpc":true,"class_":1,"race":36},{"name":"Guard Relam","x":-2163,"y":20,"z":29,"level":5,"isNpc":true,"class_":1,"race":71},{"name":"Kasine Paegra","x":-3816,"y":-1968,"z":30,"level":61,"isNpc":true,"class_":22,"race":1},{"name":"Guard Wenbie","x":-1791,"y":1182,"z":30,"level":6,"isNpc":true,"class_":1,"race":71},{"name":"Renic Losaren","x":-3528,"y":-1200,"z":54,"level":61,"isNpc":true,"class_":21,"race":1},{"name":"Vicus Nonad","x":-2288,"y":2304,"z":161,"level":26,"isNpc":true,"class_":9,"race":1},{"name":"Grahan Rothkar","x":-3728,"y":-248,"z":-192,"level":61,"isNpc":true,"class_":20,"race":1},{"name":"Heidi Grainsifter","x":-2224,"y":-1352,"z":30,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Danaria Hollin","x":-2040,"y":-1320,"z":30,"level":20,"isNpc":true,"class_":14,"race":3},{"name":"Daedet Losaren","x":-4352,"y":-1408,"z":30,"level":61,"isNpc":true,"class_":21,"race":1},{"name":"Captain Tillin","x":-4096,"y":296,"z":254,"level":61,"isNpc":true,"class_":20,"race":71},{"name":"Arthon Spiritsight","x":-3713,"y":-1241,"z":30,"level":30,"isNpc":true,"class_":3,"race":1},{"name":"Klieb Torne","x":-2072,"y":-2408,"z":30,"level":10,"isNpc":true,"class_":9,"race":1},{"name":"Micc Koter","x":-2144,"y":-2528,"z":30,"level":10,"isNpc":true,"class_":9,"race":1},{"name":"Philip Tallman","x":-1432,"y":2136,"z":30,"level":10,"isNpc":true,"class_":9,"race":1},{"name":"Sunsa Jocub","x":-2208,"y":-2440,"z":30,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Bruno Barstomper","x":-1840,"y":-2104,"z":30,"level":35,"isNpc":true,"class_":1,"race":1},{"name":"Madame Serena`s pet","x":-496,"y":-288,"z":31,"level":9,"isNpc":true,"class_":1,"race":127},{"name":"Gehna Solbenya","x":-3424,"y":-1608,"z":30,"level":61,"isNpc":true,"class_":21,"race":1},{"name":"Danaria Hollin`s pet","x":-1893,"y":-1273,"z":25,"level":19,"isNpc":true,"class_":1,"race":127},{"name":"Moran Smith","x":-2144,"y":-304,"z":31,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Zamel","x":-3160,"y":1192,"z":30,"level":10,"isNpc":true,"class_":1,"race":1},{"name":"Gharin","x":-744,"y":2712,"z":251,"level":5,"isNpc":true,"class_":1,"race":7},{"name":"Ellisha","x":-888,"y":2904,"z":30,"level":25,"isNpc":true,"class_":12,"race":3},{"name":"Lylanthian","x":-944,"y":2920,"z":25,"level":25,"isNpc":true,"class_":1,"race":4},{"name":"Tabure Ahendle","x":-4056,"y":520,"z":38,"level":61,"isNpc":true,"class_":20,"race":1},{"name":"Raz The Rat Misk","x":304,"y":-2760,"z":-105,"level":5,"isNpc":true,"class_":9,"race":55},{"name":"Guard Beren","x":-1160,"y":-1976,"z":37,"level":15,"isNpc":true,"class_":1,"race":71},{"name":"Guard Corshin","x":-1160,"y":-1600,"z":38,"level":10,"isNpc":true,"class_":1,"race":71},{"name":"Madame Serena","x":-512,"y":-304,"z":30,"level":10,"isNpc":true,"class_":14,"race":71},{"name":"Tomas Zelnik","x":-1624,"y":2376,"z":30,"level":35,"isNpc":true,"class_":1,"race":1},{"name":"Solani Dayadil","x":-1552,"y":-88,"z":30,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Bassanio Weekin","x":-1748,"y":-375,"z":30,"level":45,"isNpc":true,"class_":41,"race":71},{"name":"Hansl Bigroon","x":-2868,"y":1184,"z":29,"level":25,"isNpc":true,"class_":1,"race":1},{"name":"McNeal Jocub","x":-2088,"y":-1952,"z":30,"level":20,"isNpc":true,"class_":41,"race":71},{"name":"Voleen Tassen","x":-2128,"y":-1536,"z":30,"level":11,"isNpc":true,"class_":32,"race":813445203}];
+    const playerPos = {"x":0,"y":0,"z":0,"heading":0};
+    const bounds = {
+      minX: -4452, maxX: 2304,
+      minY: -2860, maxY: 3268,
+      minZ: -393, maxZ: 254
+    };
+
+    // Canvas setup
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const minimap = document.getElementById('minimap');
+    const minimapCtx = minimap.getContext('2d');
+
+    let scale = 0.1;
+    let offsetX = 0;
+    let offsetY = 0;
+    let isDragging = false;
+    let dragStart = { x: 0, y: 0 };
+    let showLabels = true;
+    let hoveredSpawn = null;
+
+    function resize() {
+      canvas.width = canvas.parentElement.clientWidth;
+      canvas.height = canvas.parentElement.clientHeight;
+      minimap.width = 150;
+      minimap.height = 150;
+      draw();
+    }
+
+    function worldToScreen(x, y) {
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      return {
+        x: cx + (x - offsetX) * scale,
+        y: cy - (y - offsetY) * scale  // Invert Y for screen coords
+      };
+    }
+
+    function screenToWorld(sx, sy) {
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      return {
+        x: (sx - cx) / scale + offsetX,
+        y: -(sy - cy) / scale + offsetY
+      };
+    }
+
+    function draw() {
+      ctx.fillStyle = '#0a0a15';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Draw grid
+      ctx.strokeStyle = 'rgba(100,100,100,0.2)';
+      ctx.lineWidth = 1;
+      const gridSize = 500;
+      const startWorld = screenToWorld(0, canvas.height);
+      const endWorld = screenToWorld(canvas.width, 0);
+
+      for (let x = Math.floor(startWorld.x / gridSize) * gridSize; x < endWorld.x; x += gridSize) {
+        const screen = worldToScreen(x, 0);
+        ctx.beginPath();
+        ctx.moveTo(screen.x, 0);
+        ctx.lineTo(screen.x, canvas.height);
+        ctx.stroke();
+      }
+
+      for (let y = Math.floor(startWorld.y / gridSize) * gridSize; y < endWorld.y; y += gridSize) {
+        const screen = worldToScreen(0, y);
+        ctx.beginPath();
+        ctx.moveTo(0, screen.y);
+        ctx.lineTo(canvas.width, screen.y);
+        ctx.stroke();
+      }
+
+      // Draw spawns
+      spawns.forEach(spawn => {
+        const pos = worldToScreen(spawn.x, spawn.y);
+        const radius = spawn === hoveredSpawn ? 8 : 5;
+
+        // Color by type
+        const color = spawn.isNpc ? '#ff6b6b' : '#4ecdc4';
+        const glow = spawn === hoveredSpawn ? 15 : 0;
+
+        if (glow > 0) {
+          ctx.shadowColor = color;
+          ctx.shadowBlur = glow;
+        }
+
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+
+        // Draw label
+        if (showLabels && scale > 0.05) {
+          ctx.fillStyle = 'rgba(255,255,255,0.8)';
+          ctx.font = '10px sans-serif';
+          ctx.fillText(spawn.name, pos.x + 8, pos.y + 3);
+        }
+      });
+
+      // Draw player position
+      const playerScreen = worldToScreen(playerPos.x, playerPos.y);
+      ctx.fillStyle = '#00d4ff';
+      ctx.shadowColor = '#00d4ff';
+      ctx.shadowBlur = 15;
+      ctx.beginPath();
+      ctx.arc(playerScreen.x, playerScreen.y, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Player label
+      ctx.fillStyle = '#00d4ff';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.fillText('YOU', playerScreen.x + 12, playerScreen.y + 4);
+
+      // Draw minimap
+      drawMinimap();
+    }
+
+    function drawMinimap() {
+      minimapCtx.fillStyle = '#1a1a2e';
+      minimapCtx.fillRect(0, 0, 150, 150);
+
+      const scaleX = 140 / (bounds.maxX - bounds.minX);
+      const scaleY = 140 / (bounds.maxY - bounds.minY);
+      const mapScale = Math.min(scaleX, scaleY);
+
+      spawns.forEach(spawn => {
+        const mx = 5 + (spawn.x - bounds.minX) * mapScale;
+        const my = 145 - (spawn.y - bounds.minY) * mapScale;
+        minimapCtx.fillStyle = spawn.isNpc ? '#ff6b6b' : '#4ecdc4';
+        minimapCtx.fillRect(mx - 1, my - 1, 2, 2);
+      });
+
+      // Player on minimap
+      const px = 5 + (playerPos.x - bounds.minX) * mapScale;
+      const py = 145 - (playerPos.y - bounds.minY) * mapScale;
+      minimapCtx.fillStyle = '#00d4ff';
+      minimapCtx.fillRect(px - 3, py - 3, 6, 6);
+    }
+
+    // Event handlers
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      scale *= factor;
+      scale = Math.max(0.01, Math.min(1, scale));
+      draw();
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      dragStart = { x: e.clientX, y: e.clientY };
+      canvas.style.cursor = 'grabbing';
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (isDragging) {
+        offsetX -= (e.clientX - dragStart.x) / scale;
+        offsetY += (e.clientY - dragStart.y) / scale;
+        dragStart = { x: e.clientX, y: e.clientY };
+        draw();
+      }
+
+      // Check hover
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const world = screenToWorld(mx, my);
+
+      hoveredSpawn = null;
+      for (const spawn of spawns) {
+        const dist = Math.sqrt(Math.pow(spawn.x - world.x, 2) + Math.pow(spawn.y - world.y, 2));
+        if (dist < 50 / scale) {
+          hoveredSpawn = spawn;
+          break;
+        }
+      }
+
+      const tooltip = document.getElementById('tooltip');
+      if (hoveredSpawn) {
+        tooltip.innerHTML = `
+          <div style="font-weight:bold;color:#00d4ff">${hoveredSpawn.name}</div>
+          <div>Level: ${hoveredSpawn.level || '?'}</div>
+          <div>Loc: (${hoveredSpawn.x}, ${hoveredSpawn.y}, ${hoveredSpawn.z})</div>
+          <div>Type: ${hoveredSpawn.isNpc ? 'NPC' : 'Player'}</div>
+        `;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.clientX + 15) + 'px';
+        tooltip.style.top = (e.clientY + 15) + 'px';
+      } else {
+        tooltip.style.display = 'none';
+      }
+
+      draw();
+    });
+
+    canvas.addEventListener('mouseup', () => {
+      isDragging = false;
+      canvas.style.cursor = 'grab';
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      isDragging = false;
+      document.getElementById('tooltip').style.display = 'none';
+    });
+
+    // Controls
+    function resetView() {
+      scale = 0.1;
+      offsetX = 0;
+      offsetY = 0;
+      draw();
+    }
+
+    function toggleLabels() {
+      showLabels = !showLabels;
+      draw();
+    }
+
+    // Search
+    document.getElementById('search').addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase();
+      updateSpawnList(query);
+    });
+
+    function updateSpawnList(filter = '') {
+      const list = document.getElementById('spawn-list');
+      const filtered = spawns.filter(s =>
+        s.name.toLowerCase().includes(filter)
+      ).slice(0, 50);
+
+      list.innerHTML = filtered.map(s => `
+        <div class="spawn-item" onclick="focusSpawn(${s.x}, ${s.y})">
+          <div class="spawn-name">${s.name}</div>
+          <div class="spawn-coords">(${s.x}, ${s.y}, ${s.z})</div>
+        </div>
+      `).join('');
+    }
+
+    function focusSpawn(x, y) {
+      offsetX = x;
+      offsetY = y;
+      scale = 0.3;
+      draw();
+    }
+
+    // Initialize
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Update stats
+    document.getElementById('total-spawns').textContent = spawns.length;
+    document.getElementById('npc-count').textContent = spawns.filter(s => s.isNpc).length;
+    document.getElementById('bounds-x').textContent = `${bounds.minX.toFixed(0)} to ${bounds.maxX.toFixed(0)}`;
+    document.getElementById('bounds-y').textContent = `${bounds.minY.toFixed(0)} to ${bounds.maxY.toFixed(0)}`;
+    document.getElementById('bounds-z').textContent = `${bounds.minZ.toFixed(0)} to ${bounds.maxZ.toFixed(0)}`;
+
+    updateSpawnList();
+  </script>
+</body>
+</html>
