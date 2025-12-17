@@ -2,6 +2,7 @@
 // The dopest headless EQ client - play the whole game without a GUI!
 import * as readline from 'readline';
 import * as fs from 'fs';
+import { WebSocketServer, WebSocket } from 'ws';
 import { EQClient } from './client/eq-client';
 
 const config = {
@@ -36,6 +37,8 @@ class MUDClient {
   private spawns: Map<number, any> = new Map();
   private targetId: number = 0;
   private zoneName: string = 'Unknown';
+  private wss: WebSocketServer | null = null;
+  private wsClients: Set<WebSocket> = new Set();
 
   constructor() {
     this.client = new EQClient(config);
@@ -44,6 +47,33 @@ class MUDClient {
       output: process.stdout,
     });
     this.setupEventHandlers();
+    this.startMapServer();
+  }
+
+  private startMapServer(): void {
+    try {
+      this.wss = new WebSocketServer({ port: 8769 });
+      this.wss.on('connection', (ws) => {
+        this.wsClients.add(ws);
+        // Send current state to new client
+        this.broadcast({ type: 'zone', data: { name: this.zoneName } });
+        this.broadcast({ type: 'position', data: this.client.getPosition() });
+        this.broadcast({ type: 'spawns', data: Array.from(this.spawns.values()) });
+        ws.on('close', () => this.wsClients.delete(ws));
+      });
+      this.print(`${C.dim}Map server started on ws://localhost:8769${C.reset}`);
+    } catch (err) {
+      // Port might be in use, that's ok
+    }
+  }
+
+  private broadcast(msg: any): void {
+    const data = JSON.stringify(msg);
+    this.wsClients.forEach(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(data);
+      }
+    });
   }
 
   private setupEventHandlers(): void {
@@ -86,18 +116,28 @@ class MUDClient {
       this.zoneName = zone.longName || zone.shortName || 'Unknown Zone';
       this.print(`\n${C.green}${C.bright}*** You have entered ${this.zoneName} ***${C.reset}\n`);
       this.inGame = true;
+      this.spawns.clear();
+      this.broadcast({ type: 'zone', data: { name: this.zoneName, shortName: zone.shortName } });
+      this.broadcast({ type: 'spawns', data: [] });
     });
+
+    // Broadcast position updates periodically
+    setInterval(() => {
+      if (this.inGame) {
+        this.broadcast({ type: 'position', data: this.client.getPosition() });
+      }
+    }, 500);
 
     this.client.on('spawn', (spawn: any) => {
       this.spawns.set(spawn.id, spawn);
-      this.print(spawn.name + ' appears nearby.');
+      this.broadcast({ type: 'spawn', data: spawn });
     });
 
     this.client.on('despawn', (id: number) => {
       const spawn = this.spawns.get(id);
       if (spawn) {
-        this.print(spawn.name + ' has left.');
         this.spawns.delete(id);
+        this.broadcast({ type: 'despawn', data: { id } });
       }
     });
 

@@ -87,25 +87,65 @@ function generateHTML(mapData: MapData, zoneName: string): string {
   const indices: number[] = [];
   const colors: number[] = [];
 
-  faces.forEach((face, i) => {
-    const baseIdx = i * 3;
+  // Separate floors from walls based on face normal
+  const floorFaces: typeof faces = [];
+  const wallFaces: typeof faces = [];
 
-    // Add vertices
-    vertices.push(face.v1.x, face.v1.z, -face.v1.y); // Swap Y/Z for Three.js coordinate system
+  faces.forEach((face) => {
+    // Calculate face normal to determine if it's horizontal (floor) or vertical (wall)
+    const v1 = face.v1, v2 = face.v2, v3 = face.v3;
+    const ax = v2.x - v1.x, ay = v2.y - v1.y, az = v2.z - v1.z;
+    const bx = v3.x - v1.x, by = v3.y - v1.y, bz = v3.z - v1.z;
+    // Cross product for normal
+    const nx = ay * bz - az * by;
+    const ny = az * bx - ax * bz;
+    const nz = ax * by - ay * bx;
+    const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    const normalZ = Math.abs(nz / len);
+
+    // If normal is mostly vertical (Z component > 0.7), it's a floor/ceiling
+    if (normalZ > 0.7) {
+      floorFaces.push(face);
+    } else {
+      wallFaces.push(face);
+    }
+  });
+
+  // Add floor faces (cyan/teal color)
+  floorFaces.forEach((face, i) => {
+    const baseIdx = vertices.length / 3;
+    vertices.push(face.v1.x, face.v1.z, -face.v1.y);
     vertices.push(face.v2.x, face.v2.z, -face.v2.y);
     vertices.push(face.v3.x, face.v3.z, -face.v3.y);
-
     indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
 
-    // Color by height - cyan to purple gradient
+    // Floor color - teal/cyan based on height
     const avgZ = (face.v1.z + face.v2.z + face.v3.z) / 3;
     const t = (avgZ - bounds.minZ) / (bounds.maxZ - bounds.minZ || 1);
-    const r = 0.1 + t * 0.4;
-    const g = 0.3 + (1 - t) * 0.4;
-    const b = 0.6 + t * 0.3;
-
+    const r = 0.05 + t * 0.15;
+    const g = 0.4 + t * 0.2;
+    const b = 0.5 + t * 0.2;
     colors.push(r, g, b, r, g, b, r, g, b);
   });
+
+  // Add wall faces (purple/magenta color)
+  wallFaces.forEach((face, i) => {
+    const baseIdx = vertices.length / 3;
+    vertices.push(face.v1.x, face.v1.z, -face.v1.y);
+    vertices.push(face.v2.x, face.v2.z, -face.v2.y);
+    vertices.push(face.v3.x, face.v3.z, -face.v3.y);
+    indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
+
+    // Wall color - purple/magenta based on height
+    const avgZ = (face.v1.z + face.v2.z + face.v3.z) / 3;
+    const t = (avgZ - bounds.minZ) / (bounds.maxZ - bounds.minZ || 1);
+    const r = 0.3 + t * 0.3;
+    const g = 0.15 + t * 0.1;
+    const b = 0.5 + t * 0.3;
+    colors.push(r, g, b, r, g, b, r, g, b);
+  });
+
+  console.log('Floors: ' + floorFaces.length + ', Walls: ' + wallFaces.length);
 
   const centerX = (bounds.minX + bounds.maxX) / 2;
   const centerY = (bounds.minY + bounds.maxY) / 2;
@@ -314,7 +354,7 @@ function generateHTML(mapData: MapData, zoneName: string): string {
 
       <h2>🎮 Render Options</h2>
       <div class="btn-group">
-        <button id="btn-wireframe" onclick="toggleWireframe()">Wireframe</button>
+        <button id="btn-wireframe" class="active" onclick="toggleEdges()">Edges</button>
         <button id="btn-solid" onclick="toggleSolid()">Solid Fill</button>
         <button id="btn-floors" onclick="toggleFloors()">Floors Only</button>
         <button id="btn-walls" onclick="toggleWalls()">Walls Only</button>
@@ -369,9 +409,10 @@ function generateHTML(mapData: MapData, zoneName: string): string {
 
     // Three.js setup
     let scene, camera, renderer, controls;
-    let zoneMesh, wireframeMesh;
+    let zoneMesh, wireframeMesh, edgesMesh;
     let showWireframe = false;
-    let showSolid = true;
+    let showSolid = false;  // Off by default - edges look cleaner
+    let showEdges = true;
     let showFloors = false;
     let showWalls = false;
     let zCutoff = bounds.maxZ;
@@ -442,6 +483,7 @@ function generateHTML(mapData: MapData, zoneName: string): string {
     function createZoneMesh() {
       if (zoneMesh) scene.remove(zoneMesh);
       if (wireframeMesh) scene.remove(wireframeMesh);
+      if (edgesMesh) scene.remove(edgesMesh);
 
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
@@ -449,24 +491,36 @@ function generateHTML(mapData: MapData, zoneName: string): string {
       geometry.setIndex(new THREE.BufferAttribute(indices, 1));
       geometry.computeVertexNormals();
 
-      // Solid mesh
+      // Solid mesh (off by default - too noisy)
       const material = new THREE.MeshPhongMaterial({
         vertexColors: true,
         side: THREE.DoubleSide,
         transparent: true,
-        opacity: opacity,
-        shininess: 30,
+        opacity: opacity * 0.5,
+        shininess: 10,
+        flatShading: true,
       });
       zoneMesh = new THREE.Mesh(geometry, material);
       zoneMesh.visible = showSolid;
       scene.add(zoneMesh);
 
-      // Wireframe overlay
+      // Clean edges - this is the main visualization
+      const edges = new THREE.EdgesGeometry(geometry, 15); // 15 degree threshold
+      const edgeMat = new THREE.LineBasicMaterial({
+        color: 0x00d4ff,
+        transparent: true,
+        opacity: 0.8,
+      });
+      edgesMesh = new THREE.LineSegments(edges, edgeMat);
+      edgesMesh.visible = true;
+      scene.add(edgesMesh);
+
+      // Wireframe overlay (optional)
       const wireMat = new THREE.MeshBasicMaterial({
         color: 0x00d4ff,
         wireframe: true,
         transparent: true,
-        opacity: 0.3,
+        opacity: 0.15,
       });
       wireframeMesh = new THREE.Mesh(geometry.clone(), wireMat);
       wireframeMesh.visible = showWireframe;
@@ -517,7 +571,13 @@ function generateHTML(mapData: MapData, zoneName: string): string {
     function toggleSolid() {
       showSolid = !showSolid;
       zoneMesh.visible = showSolid;
-      document.getElementById('btn-solid').classList.toggle('active', !showSolid);
+      document.getElementById('btn-solid').classList.toggle('active', showSolid);
+    }
+
+    function toggleEdges() {
+      showEdges = !showEdges;
+      if (edgesMesh) edgesMesh.visible = showEdges;
+      document.getElementById('btn-wireframe').classList.toggle('active', showEdges);
     }
 
     function toggleFloors() {
