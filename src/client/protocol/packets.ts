@@ -651,6 +651,7 @@ export function decodeSpawn(data: Buffer): Spawn {
 
 export interface PlayerPositionUpdate {
   spawnId: number;
+  sequence?: number;  // Increments each position packet
   x: number;
   y: number;
   z: number;
@@ -662,31 +663,45 @@ export interface PlayerPositionUpdate {
 }
 
 export function encodePlayerPositionUpdate(pos: PlayerPositionUpdate): Buffer {
-  const pb = new PacketBuffer(46);
+  // Titanium PlayerPositionUpdateClient_Struct (36 bytes)
+  const pb = new PacketBuffer(36);
 
-  pb.writeUInt16LE(0); // sequence - server will handle
+  // Offset 0: spawn_id (uint16)
   pb.writeUInt16LE(pos.spawnId);
-  pb.writeUInt16LE(0); // vehicle_id
-  pb.skip(4); // unknown
-  pb.writeFloatLE(pos.deltaX);
 
-  // Heading is 12 bits, packed with padding
-  const headingPacked = (pos.heading & 0xFFF) | 0;
-  pb.writeUInt32LE(headingPacked);
+  // Offset 2: sequence (uint16) - increment each packet
+  pb.writeUInt16LE(pos.sequence || 0);
 
-  pb.writeFloatLE(pos.x);
-  pb.writeFloatLE(pos.deltaZ);
-  pb.writeFloatLE(pos.z);
+  // Offset 4: y_pos (float)
   pb.writeFloatLE(pos.y);
 
-  // Animation is 10 bits packed
-  const animPacked = (pos.animation & 0x3FF) | 0;
-  pb.writeUInt32LE(animPacked);
+  // Offset 8: delta_z (float)
+  pb.writeFloatLE(pos.deltaZ);
 
+  // Offset 12: delta_y (float)
   pb.writeFloatLE(pos.deltaY);
 
-  // Delta heading
-  pb.writeUInt32LE(0);
+  // Offset 16: delta_x (float)
+  pb.writeFloatLE(pos.deltaX);
+
+  // Offset 20: animation(10) | delta_heading(10) | padding(12)
+  const animDeltaPacked = (pos.animation & 0x3FF) |
+                          ((0 & 0x3FF) << 10) |  // delta_heading
+                          (1 << 20);              // padding (mostly 1)
+  pb.writeUInt32LE(animDeltaPacked);
+
+  // Offset 24: x_pos (float)
+  pb.writeFloatLE(pos.x);
+
+  // Offset 28: z_pos (float)
+  pb.writeFloatLE(pos.z);
+
+  // Offset 32: heading(12) | padding(4) as uint16
+  const headingPacked = (Math.floor(pos.heading) & 0xFFF);
+  pb.writeUInt16LE(headingPacked);
+
+  // Offset 34: unknown[2]
+  pb.writeUInt16LE(0);
 
   return pb.getBuffer();
 }

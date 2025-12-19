@@ -211,7 +211,8 @@ export class EQSession extends EventEmitter {
   private handlePacket(data: Buffer): void {
     if (data.length < 2) return;
 
-    this.emit('debug', `Received: ${data.length} bytes, hex=${data.toString('hex').substring(0, 60)}...`);
+    // Commenting out verbose packet logging
+    // this.emit('debug', `Received: ${data.length} bytes, hex=${data.toString('hex').substring(0, 60)}...`);
 
     const zero = data.readUInt8(0);
     const opcode = data.readUInt8(1);
@@ -231,25 +232,58 @@ export class EQSession extends EventEmitter {
         this.handleCombined(data);
         break;
 
+      // Handle all 4 streams for reliable packets
       case SessionOpcodes.OP_Packet:
-        this.handleReliable(data);
+        this.handleReliable(data, 0);
+        break;
+      case SessionOpcodes.OP_Packet2:
+        this.handleReliable(data, 1);
+        break;
+      case SessionOpcodes.OP_Packet3:
+        this.handleReliable(data, 2);
+        break;
+      case SessionOpcodes.OP_Packet4:
+        this.handleReliable(data, 3);
         break;
 
+      // Handle all 4 streams for fragments
       case SessionOpcodes.OP_Fragment:
-        this.handleFragment(data);
+        this.handleFragment(data, 0);
+        break;
+      case SessionOpcodes.OP_Fragment2:
+        this.handleFragment(data, 1);
+        break;
+      case SessionOpcodes.OP_Fragment3:
+        this.handleFragment(data, 2);
+        break;
+      case SessionOpcodes.OP_Fragment4:
+        this.handleFragment(data, 3);
         break;
 
+      // Handle all ACK streams
       case SessionOpcodes.OP_Ack:
-        this.emit('debug', `OP_Ack raw: ${data.toString('hex').substring(0, 20)}`);
+      case SessionOpcodes.OP_Ack2:
+      case SessionOpcodes.OP_Ack3:
+      case SessionOpcodes.OP_Ack4:
+        this.emit('debug', `OP_Ack (stream ${opcode - SessionOpcodes.OP_Ack}): ${data.toString('hex').substring(0, 20)}`);
         this.handleAck(data);
         break;
 
+      // Handle all OutOfOrderAck streams
       case SessionOpcodes.OP_OutOfOrderAck:
+      case SessionOpcodes.OP_OutOfOrderAck2:
+      case SessionOpcodes.OP_OutOfOrderAck3:
+      case SessionOpcodes.OP_OutOfOrderAck4:
         this.handleOutOfOrderAck(data);
         break;
 
       case SessionOpcodes.OP_KeepAlive:
         // Respond to keep alive
+        this.sendRaw(data);
+        break;
+
+      case SessionOpcodes.OP_OutboundPing:
+        // Server is pinging us - respond with same packet
         this.sendRaw(data);
         break;
 
@@ -259,6 +293,10 @@ export class EQSession extends EventEmitter {
 
       case SessionOpcodes.OP_SessionStatRequest:
         this.handleStatRequest(data);
+        break;
+
+      case SessionOpcodes.OP_AppCombined:
+        this.handleAppCombined(data);
         break;
 
       default:
@@ -307,18 +345,38 @@ export class EQSession extends EventEmitter {
   }
 
   private handleSessionResponse(data: Buffer): void {
-    if (data.length < 17) return;
+    this.emit('debug', `SessionResponse raw (${data.length} bytes): [${data.toString('hex')}]`);
 
+    if (data.length < 17) {
+      this.emit('debug', `SessionResponse too short: ${data.length} bytes`);
+      return;
+    }
+
+    // ReliableStreamConnectReply layout (17 bytes):
+    // offset 0: zero (1 byte)
+    // offset 1: opcode (1 byte) = 0x02
+    // offset 2: connect_code (4 bytes BE) = session ID
+    // offset 6: encode_key (4 bytes BE)
+    // offset 10: crc_bytes (1 byte)
+    // offset 11: max_packet_size (4 bytes BE)
+    // offset 15: encode_pass1 (1 byte)
+    // offset 16: encode_pass2 (1 byte)
     this.sessionId = data.readUInt32BE(2);
     this.encodeKey = data.readUInt32BE(6);
     this.crcBytes = data.readUInt8(10);
-    this.encodePass1 = data.readUInt8(11);
-    this.encodePass2 = data.readUInt8(12);
-    this.maxPacketSize = data.readUInt32BE(13);
+    this.maxPacketSize = data.readUInt32BE(11);
+    this.encodePass1 = data.readUInt8(15);
+    this.encodePass2 = data.readUInt8(16);
+
+    // Fallback if maxPacketSize is invalid
+    if (this.maxPacketSize === 0 || this.maxPacketSize > 10000) {
+      this.emit('debug', `Invalid maxPacketSize ${this.maxPacketSize}, defaulting to 512`);
+      this.maxPacketSize = 512;
+    }
 
     this.state = SessionState.Connected;
     this.emit('connected');
-    this.emit('debug', `Session established: id=${this.sessionId}, encode=${this.encodeKey}`);
+    this.emit('debug', `Session established: id=0x${this.sessionId.toString(16)}, encodeKey=0x${this.encodeKey.toString(16)}, crc=${this.crcBytes}, maxPkt=${this.maxPacketSize}`);
   }
 
   private handleCombined(data: Buffer): void {
@@ -336,13 +394,33 @@ export class EQSession extends EventEmitter {
     }
   }
 
-  private handleReliable(data: Buffer): void {
+  private handleAppCombined(data: Buffer): void {
+    // AppCombined (0x19) contains multiple APPLICATION layer packets
+    // Format: [00][19][len1][app_opcode1+payload1][len2][app_opcode2+payload2]...
+    // Unlike OP_Combined, these are NOT session layer packets
+    let offset = 2;
+    let count = 0;
+    while (offset < data.length) {
+      const subLen = data.readUInt8(offset);
+      if (subLen === 0 || offset + 1 + subLen > data.length) break;
+
+      const subPacket = data.slice(offset + 1, offset + 1 + subLen);
+      // These are application packets (opcode LE + payload)
+      // Process directly without going through session layer
+      this.processAppPacket(subPacket);
+      offset += 1 + subLen;
+      count++;
+    }
+    this.emit('debug', `AppCombined: processed ${count} sub-packets`);
+  }
+
+  private handleReliable(data: Buffer, stream: number = 0): void {
     if (data.length < 4) return;
 
     const sequence = data.readUInt16BE(2);
 
-    // Send ACK
-    this.sendAck(sequence);
+    // Send ACK for the correct stream
+    this.sendAck(sequence, stream);
 
     // Calculate sequence difference (handling wrap-around)
     const diff = (sequence - this.sequenceIn) & 0xFFFF;
@@ -383,7 +461,7 @@ export class EQSession extends EventEmitter {
   private compressedFragmentData: Buffer[] = [];
   private compressedFragmentSeq: number = -1;
 
-  private handleFragment(data: Buffer): void {
+  private handleFragment(data: Buffer, stream: number = 0): void {
     if (data.length < 4) return;
 
     // Check for compressed fragment: session_opcode(2) + 0x5a + 0x78...
@@ -399,8 +477,8 @@ export class EQSession extends EventEmitter {
         const sequence = decompressed.readUInt16BE(0);
         const fragmentData = decompressed.slice(2);
 
-        // ACK the sequence
-        this.sendAck(sequence);
+        // ACK the sequence on the correct stream
+        this.sendAck(sequence, stream);
 
         // Handle compressed fragment piece
         // Zone sends large structs (like PlayerProfile ~19KB) as multiple fragments
@@ -416,18 +494,30 @@ export class EQSession extends EventEmitter {
           if (fragmentData.length >= 4) {
             const potentialSize = fragmentData.readUInt32BE(0);
             const remainingData = fragmentData.length - 4; // Data after size header
+            const opcodeIfStandalone = fragmentData.readUInt16LE(0);
 
             // A fragmented packet has totalSize > remainingData (needs more fragments)
-            // And totalSize should be reasonable (< 100KB)
-            if (potentialSize > remainingData && potentialSize < 100000) {
+            // And totalSize should be reasonable (< 100KB but > current data)
+            // The key heuristic: fragments have size headers that are reasonable totals
+            const looksLikeFragmentStart = potentialSize > remainingData &&
+                                           potentialSize < 100000 &&
+                                           potentialSize > 1000;  // Real fragments are usually > 1KB total
+
+            // Only log for potential issues (standalone with garbage opcodes)
+            if (!looksLikeFragmentStart && (opcodeIfStandalone === 0 || opcodeIfStandalone > 0x8000)) {
+              this.emit('debug', `Fragment ISSUE: seq=${sequence}, len=${fragmentData.length}, potSize=${potentialSize}, opcode=0x${opcodeIfStandalone.toString(16)}`);
+            }
+
+            if (looksLikeFragmentStart) {
               // This is a first fragment - totalSize is larger than what we have
               this.compressedFragmentTotal = potentialSize;
               this.compressedFragmentData = [fragmentData.slice(4)];
               this.compressedFragmentSeq = sequence;
-              this.emit('debug', `Compressed fragment start: seq=${sequence}, totalSize=${potentialSize}, firstData=${remainingData}bytes`);
+              this.emit('debug', `Compressed fragment START: seq=${sequence}, totalSize=${potentialSize}, firstData=${remainingData}bytes`);
             } else {
               // Standalone packet - either totalSize fits in one fragment or is invalid
               // Treat entire fragmentData as app packet (first 2 bytes are opcode)
+              this.emit('debug', `Fragment STANDALONE: seq=${sequence}, len=${fragmentData.length}, opcode=0x${opcodeIfStandalone.toString(16)}`);
               this.processAppPacket(fragmentData);
             }
           } else {
@@ -441,7 +531,8 @@ export class EQSession extends EventEmitter {
 
           // Check if complete
           const currentSize = this.compressedFragmentData.reduce((sum, f) => sum + f.length, 0);
-          this.emit('debug', `Fragment added: seq=${sequence}, parts=${this.compressedFragmentData.length}, current=${currentSize}/${this.compressedFragmentTotal}`);
+          // Only log completion, not every fragment add
+          // this.emit('debug', `Fragment added: seq=${sequence}, parts=${this.compressedFragmentData.length}, current=${currentSize}/${this.compressedFragmentTotal}`);
 
           if (currentSize >= this.compressedFragmentTotal) {
             const complete = Buffer.concat(this.compressedFragmentData);
@@ -466,7 +557,7 @@ export class EQSession extends EventEmitter {
     // Handle 0xa5 uncompressed marker
     if (data.length >= 3 && data[2] === 0xa5) {
       const sequence = 0; // Uncompressed packets may not have sequence
-      this.sendAck(sequence);
+      this.sendAck(sequence, stream);
       const appData = data.slice(3);
       this.processAppPacket(appData);
       return;
@@ -475,7 +566,7 @@ export class EQSession extends EventEmitter {
     // Normal uncompressed fragment (no 0x5a/0xa5 marker)
     const sequence = data.readUInt16BE(2);
     if (this.completedFragmentSequences.has(sequence)) return;
-    this.sendAck(sequence);
+    this.sendAck(sequence, stream);
 
     const potentialTotalSize = data.length >= 8 ? data.readUInt32BE(4) : 0;
     const isFirstFragment = potentialTotalSize > 0 && potentialTotalSize < 1000000;
@@ -538,12 +629,32 @@ export class EQSession extends EventEmitter {
   }
 
   private handleStatRequest(data: Buffer): void {
-    // Send stat response
-    const response = Buffer.alloc(40);
+    // OP_SessionStatRequest: Server wants latency stats
+    // We need to respond with proper session stats structure
+    // Format: [0x00][opcode][16 bytes of stat data]
+    const response = Buffer.alloc(18);
     response.writeUInt8(0x00, 0);
     response.writeUInt8(SessionOpcodes.OP_SessionStatResponse, 1);
-    // Fill with basic stats
+
+    // Session stats structure (network byte order):
+    // uint16 RequestID (echo from request if present)
+    // uint32 last_local_delta
+    // uint32 average_delta
+    // uint32 low_delta
+    // uint32 high_delta
+    // uint32 last_remote_delta
+    // uint64 packets_sent
+    // uint64 packets_received
+
+    // Write minimal stats (32-bit deltas in ms, network byte order)
+    response.writeUInt16BE(0, 2);  // RequestID
+    response.writeUInt32BE(50, 4); // last_local_delta (50ms)
+    response.writeUInt32BE(50, 8); // average_delta
+    response.writeUInt32BE(30, 12); // low_delta
+    response.writeUInt32BE(100, 16); // high_delta
+
     this.sendRaw(response);
+    this.emit('debug', 'Sent session stat response');
   }
 
   private processAppPacket(data: Buffer): void {
@@ -551,6 +662,27 @@ export class EQSession extends EventEmitter {
 
     const opcode = data.readUInt16LE(0);
     const payload = data.slice(2);
+
+    // Log ALL application opcodes in zone session for debugging
+    this.emit('debug', `APP opcode: 0x${opcode.toString(16).padStart(4, '0')} (${data.length} bytes)`);
+
+    // Debug suspicious opcodes (0x0, 0xffff, or any in the 0x3000-0x3100 range)
+    if (opcode === 0 || opcode === 0xffff || (opcode >= 0x3000 && opcode <= 0x3100)) {
+      const hex = data.slice(0, Math.min(64, data.length)).toString('hex');
+      this.emit('debug', `SUSPICIOUS opcode 0x${opcode.toString(16)} (${data.length} bytes) raw: [${hex}]`);
+
+      // Search for 0x0920 within this packet in case it's mis-aligned
+      const target = Buffer.from([0x20, 0x09]); // 0x0920 in LE
+      const idx = data.indexOf(target);
+      if (idx >= 0) {
+        this.emit('debug', `  -> Found 0x0920 at offset ${idx} within this packet!`);
+      }
+    }
+
+    // Specifically look for OP_NewZone (0x0920)
+    if (opcode === 0x0920) {
+      this.emit('debug', `*** FOUND OP_NewZone 0x0920! (${data.length} bytes) ***`);
+    }
 
     this.emit('packet', opcode, payload);
   }
@@ -619,11 +751,34 @@ export class EQSession extends EventEmitter {
     }
   }
 
-  private sendAck(sequence: number): void {
-    const ack = Buffer.alloc(4);
+  private sendAck(sequence: number, stream: number = 0): void {
+    // ACKs need CRC if crcBytes > 0
+    const packetLen = 4 + this.crcBytes;
+    const ack = Buffer.alloc(packetLen);
     ack.writeUInt8(0x00, 0);
-    ack.writeUInt8(SessionOpcodes.OP_Ack, 1);
+
+    // Use correct ACK opcode for the stream (0x15, 0x16, 0x17, 0x18)
+    const ackOpcodes = [
+      SessionOpcodes.OP_Ack,    // Stream 0: 0x15
+      SessionOpcodes.OP_Ack2,   // Stream 1: 0x16
+      SessionOpcodes.OP_Ack3,   // Stream 2: 0x17
+      SessionOpcodes.OP_Ack4,   // Stream 3: 0x18
+    ];
+    ack.writeUInt8(ackOpcodes[stream] || SessionOpcodes.OP_Ack, 1);
     ack.writeUInt16BE(sequence, 2);
+
+    // Add CRC if required
+    if (this.crcBytes > 0) {
+      const crc = this.calculateCRC(ack.slice(0, 4));
+      if (this.crcBytes === 2) {
+        ack.writeUInt16BE(crc, 4);
+      }
+      // Log first few ACKs to debug CRC
+      if (sequence < 5) {
+        this.emit('debug', `ACK seq=${sequence} stream=${stream} crc=0x${crc.toString(16)} encKey=0x${this.encodeKey.toString(16)} hex=[${ack.toString('hex')}]`);
+      }
+    }
+
     this.sendRaw(ack);
   }
 
@@ -759,12 +914,13 @@ export class EQSession extends EventEmitter {
   }
 
   private startKeepAlive(): void {
+    // Send immediate keepalive on connect (with CRC if required)
+    this.sendKeepAlive();
+
+    // Send every 1 second (zone servers have ~10sec timeout, stay well under)
     this.keepAliveInterval = setInterval(() => {
-      const keepAlive = Buffer.alloc(2);
-      keepAlive.writeUInt8(0x00, 0);
-      keepAlive.writeUInt8(SessionOpcodes.OP_KeepAlive, 1);
-      this.sendRaw(keepAlive);
-    }, 9000);
+      this.sendKeepAlive();
+    }, 1000);
 
     // Retry pending packets
     this.retryInterval = setInterval(() => {
@@ -786,6 +942,24 @@ export class EQSession extends EventEmitter {
         }
       }
     }, 1000);
+  }
+
+  private sendKeepAlive(): void {
+    // Keepalives may need CRC like other packets
+    const packetLen = 2 + this.crcBytes;
+    const keepAlive = Buffer.alloc(packetLen);
+    keepAlive.writeUInt8(0x00, 0);
+    keepAlive.writeUInt8(SessionOpcodes.OP_KeepAlive, 1);
+
+    // Add CRC if required
+    if (this.crcBytes > 0) {
+      const crc = this.calculateCRC(keepAlive.slice(0, 2));
+      if (this.crcBytes === 2) {
+        keepAlive.writeUInt16BE(crc, 2);
+      }
+    }
+
+    this.sendRaw(keepAlive);
   }
 
   private cleanup(): void {

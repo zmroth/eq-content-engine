@@ -10,10 +10,34 @@ export const SessionOpcodes = {
   OP_KeepAlive: 0x06,
   OP_SessionStatRequest: 0x07,
   OP_SessionStatResponse: 0x08,
+
+  // Stream 0 (primary)
   OP_Packet: 0x09,
   OP_Fragment: 0x0d,
   OP_OutOfOrderAck: 0x11,
   OP_Ack: 0x15,
+
+  // Stream 1
+  OP_Packet2: 0x0a,
+  OP_Fragment2: 0x0e,
+  OP_OutOfOrderAck2: 0x12,
+  OP_Ack2: 0x16,
+
+  // Stream 2
+  OP_Packet3: 0x0b,
+  OP_Fragment3: 0x0f,
+  OP_OutOfOrderAck3: 0x13,
+  OP_Ack3: 0x17,
+
+  // Stream 3
+  OP_Packet4: 0x0c,
+  OP_Fragment4: 0x10,
+  OP_OutOfOrderAck4: 0x14,
+  OP_Ack4: 0x18,
+
+  // Other
+  OP_AppCombined: 0x19,
+  OP_OutboundPing: 0x1c,
 };
 
 export const LoginOpcodes = {
@@ -60,9 +84,9 @@ export const ZoneOpcodes = {
   OP_ZoneSpawns: 0x2e78,     // Actual opcode from server (contains NPC spawn data)
   OP_ReqNewZone: 0x7ac5,     // ShowEQ 10/27/05
   OP_ReqClientSpawn: 0x0322, // ShowEQ 10/27/05
-  OP_SpawnAppearance: 0x0f1d,
-  OP_ClientReady: 0x56cf,
-  OP_DoorInfo: 0x4c24,       // Door spawn data
+  OP_SpawnAppearance: 0x7c32,  // Corrected from patch_Titanium.conf
+  OP_ClientReady: 0x5e20,      // Corrected: was 0x56cf, should be 0x5e20
+  OP_DoorInfo: 0x4c24,         // Door spawn data
 
   // Movement
   OP_ClientUpdate: 0x14cb,
