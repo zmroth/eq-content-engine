@@ -244,7 +244,12 @@ export class EQClient extends EventEmitter {
 
   // Select a server from the server list
   selectServer(serverNumber: number): void {
-    if (!this.loginSession) return;
+    this.emit('debug', `selectServer called with ${serverNumber}`);
+
+    if (!this.loginSession) {
+      this.emit('debug', 'selectServer: No login session!');
+      return;
+    }
 
     // Find and store the selected server
     this.selectedServer = this.servers.find(s => s.id === serverNumber) || this.servers[serverNumber - 1];
@@ -254,8 +259,18 @@ export class EQClient extends EventEmitter {
 
     this.emit('debug', `Selected server: ${this.selectedServer?.name} (${this.selectedServer?.ip})`);
 
-    const playReq = Packets.encodePlayRequest(serverNumber);
-    this.loginSession.send(LoginOpcodes.OP_PlayEverquestRequest, playReq);
+    try {
+      // Use the selected server's actual ID, not the input number
+      const serverId = this.selectedServer?.id || serverNumber || 1;
+      this.emit('debug', `Using server ID: ${serverId}`);
+      const playReq = Packets.encodePlayRequest(serverId);
+      this.emit('debug', `Sending play request: ${playReq.toString('hex')}`);
+      this.loginSession.send(LoginOpcodes.OP_PlayEverquestRequest, playReq);
+      this.emit('debug', 'Play request sent successfully');
+    } catch (err: any) {
+      this.emit('debug', `Failed to send play request: ${err.message}`);
+    }
+
     this.emit('status', `Selecting server ${serverNumber}...`);
   }
 
@@ -553,6 +568,7 @@ export class EQClient extends EventEmitter {
         break;
 
       case ZoneOpcodes.OP_NewZone:
+        this.emit('debug', `Received OP_NewZone (${data.length} bytes)`);
         this.handleNewZone(data);
         break;
 
@@ -590,6 +606,11 @@ export class EQClient extends EventEmitter {
 
       case ZoneOpcodes.OP_Action:
         this.handleAction(data);
+        break;
+
+      case ZoneOpcodes.OP_SpawnAppearance:
+        // SpawnAppearance contains entity state changes (animations, etc.)
+        this.emit('debug', `SpawnAppearance: ${data.length} bytes`);
         break;
 
       default:
@@ -630,15 +651,53 @@ export class EQClient extends EventEmitter {
     const name = data.slice(12940, 13004).toString('utf8').replace(/\0/g, '').trim();
     const lastName = data.slice(13004, 13036).toString('utf8').replace(/\0/g, '').trim();
 
-    // Extract player position from PlayerProfile (offsets 4700-4712)
-    // Note: EQ uses y,x,z order!
-    if (data.length >= 4716) {
-      const y = data.readFloatLE(4700);
-      const x = data.readFloatLE(4704);
-      const z = data.readFloatLE(4708);
-      const heading = data.readFloatLE(4712);
-      this.myPosition = { x, y, z, heading };
-      this.emit('debug', `Player position from profile: (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
+    // Extract player position from PlayerProfile (titanium_structs.h offsets)
+    // X: 13116, Y: 13120, Z: 13124, Heading: 13128
+    if (data.length >= 13132) {
+      const x = data.readFloatLE(13116);
+      const y = data.readFloatLE(13120);
+      const z = data.readFloatLE(13124);
+      const heading = data.readFloatLE(13128);
+      this.emit('debug', `Player position from profile: (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}) heading=${heading.toFixed(1)}`);
+
+      // If position is (0,0,0), try reading from primary bind point
+      // binds[5] starts at offset 24, each BindStruct is 20 bytes: zoneId(4) + x(4) + y(4) + z(4) + heading(4)
+      if (x === 0 && y === 0 && z === 0 && data.length >= 44) {
+        const bindX = data.readFloatLE(28);  // binds[0].x
+        const bindY = data.readFloatLE(32);  // binds[0].y
+        const bindZ = data.readFloatLE(36);  // binds[0].z
+        const bindHeading = data.readFloatLE(40);  // binds[0].heading
+        this.emit('debug', `Fallback to bind point: (${bindX.toFixed(1)}, ${bindY.toFixed(1)}, ${bindZ.toFixed(1)}) heading=${bindHeading.toFixed(1)}`);
+
+        if (bindX !== 0 || bindY !== 0 || bindZ !== 0) {
+          this.myPosition = { x: bindX, y: bindY, z: bindZ, heading: bindHeading };
+        } else {
+          this.myPosition = { x, y, z, heading };
+        }
+      } else {
+        this.myPosition = { x, y, z, heading };
+      }
+    } else {
+      this.emit('debug', `PlayerProfile too short for position extraction: ${data.length} bytes (need 13132)`);
+    }
+
+    // Extract entity ID from PlayerProfile (offset 14384)
+    // This is also used as spawn ID in position updates
+    if (data.length >= 14388) {
+      const entityId = data.readUInt32LE(14384);
+      this.emit('debug', `Profile size: ${data.length}, entityId at 14384: ${entityId}`);
+      if (entityId > 0) {
+        this.mySpawnId = entityId;
+        this.emit('debug', `Player spawn ID from profile: ${entityId}`);
+      }
+    } else {
+      this.emit('debug', `Profile too short for entity ID: ${data.length} bytes (need 14388)`);
+    }
+
+    // Store character name for spawn matching
+    if (name) {
+      this.characterName = name;
+      this.emit('debug', `Character name from profile: "${name}"`);
     }
 
     this.emit('debug', `PlayerProfile: ${name} Level ${level} ${this.getClassName(class_)} (${data.length} bytes)`);
@@ -680,13 +739,19 @@ export class EQClient extends EventEmitter {
 
     this.emit('zoneEnter', this.currentZone);
     this.emit('status', `Entered ${zone.zoneLongName}`);
+
+    // If player position is still (0,0,0), use zone safe point
+    if (this.myPosition.x === 0 && this.myPosition.y === 0 && this.myPosition.z === 0) {
+      this.myPosition = { x: zone.safeX, y: zone.safeY, z: zone.safeZ, heading: 0 };
+      this.emit('debug', `Using zone safe point as position: (${zone.safeX}, ${zone.safeY}, ${zone.safeZ})`);
+    }
   }
 
   private sendReqClientSpawn(): void {
     if (this.reqClientSpawnSent || !this.zoneSession) return;
     this.reqClientSpawnSent = true;
 
-    this.emit('debug', 'Sending OP_ReqClientSpawn to request zone content');
+    this.emit('debug', `Sending OP_ReqClientSpawn (0x${ZoneOpcodes.OP_ReqClientSpawn.toString(16)}) to request zone content`);
     // ReqClientSpawn is an empty packet with just the opcode
     const emptyPacket = Buffer.alloc(0);
     this.zoneSession.send(ZoneOpcodes.OP_ReqClientSpawn, emptyPacket);
@@ -704,6 +769,43 @@ export class EQClient extends EventEmitter {
     const emptyPacket = Buffer.alloc(0);
     this.zoneSession.send(ZoneOpcodes.OP_ClientReady, emptyPacket);
     this.emit('status', 'Zone entry complete - ready to play');
+
+    // Start position heartbeat - zone server expects periodic updates
+    this.startPositionHeartbeat();
+  }
+
+  private positionHeartbeatInterval?: NodeJS.Timeout;
+  private positionSequence: number = 0;
+
+  private startPositionHeartbeat(): void {
+    // Send position update every 2 seconds to keep zone server alive
+    // The zone server has a 30 second linkdead timeout
+    this.positionHeartbeatInterval = setInterval(() => {
+      if (!this.zoneSession) return;
+
+      // If we don't have spawn ID yet, use our entity ID
+      const spawnId = this.mySpawnId || 1;
+
+      // Increment sequence with each position packet
+      this.positionSequence = (this.positionSequence + 1) & 0xFFFF;
+
+      this.emit('debug', `Position heartbeat: spawnId=${this.mySpawnId}, seq=${this.positionSequence}, pos=(${this.myPosition.x.toFixed(1)}, ${this.myPosition.y.toFixed(1)}, ${this.myPosition.z.toFixed(1)})`);
+
+      const pos = Packets.encodePlayerPositionUpdate({
+        spawnId: spawnId,
+        sequence: this.positionSequence,
+        x: this.myPosition.x,
+        y: this.myPosition.y,
+        z: this.myPosition.z,
+        heading: this.myPosition.heading,
+        deltaX: 0,
+        deltaY: 0,
+        deltaZ: 0,
+        animation: 0x64,  // Standing animation
+      });
+
+      this.zoneSession.send(ZoneOpcodes.OP_ClientUpdate, pos);
+    }, 2000);
   }
 
   private handleNewSpawn(data: Buffer): void {
@@ -731,10 +833,16 @@ export class EQClient extends EventEmitter {
       // Check if this is us (case-insensitive, handle underscores)
       const spawnNameLower = spawn.name.toLowerCase().replace(/_/g, ' ').trim();
       const charNameLower = this.characterName.toLowerCase().replace(/_/g, ' ').trim();
+
+      // Debug: log all non-NPC individual spawns
+      if (spawn.npc !== 1) {
+        this.emit('debug', `NewSpawn player candidate: "${spawn.name}" (looking for "${this.characterName}") pos=(${spawn.x}, ${spawn.y}, ${spawn.z}) spawnId=${spawn.spawnId}`);
+      }
+
       if (spawnNameLower === charNameLower) {
         this.mySpawnId = spawn.spawnId;
         this.myPosition = { x: spawn.x, y: spawn.y, z: spawn.z, heading: spawn.heading };
-        this.emit('debug', `Found player spawn: ${spawn.name} at (${spawn.x}, ${spawn.y}, ${spawn.z})`);
+        this.emit('debug', `Found player spawn (NewSpawn): ${spawn.name} at (${spawn.x}, ${spawn.y}, ${spawn.z}) spawnId=${spawn.spawnId}`);
       }
 
       this.emit('spawn', entity);
@@ -794,10 +902,17 @@ export class EQClient extends EventEmitter {
             // Check if this is us (player spawn)
             const spawnNameLower = cleanName.toLowerCase();
             const charNameLower = this.characterName.toLowerCase();
-            if (spawnNameLower === charNameLower && (spawn.x !== 0 || spawn.y !== 0 || spawn.z !== 0)) {
+
+            // Debug: log all non-NPC spawns to help diagnose player matching
+            if (!spawn.isNpc) {
+              this.emit('debug', `Player spawn candidate: "${cleanName}" (looking for "${this.characterName}") pos=(${spawn.x}, ${spawn.y}, ${spawn.z}) spawnId=${spawn.spawnId}`);
+            }
+
+            if (spawnNameLower === charNameLower) {
+              // Match found - set spawn ID even if position is zero
               this.mySpawnId = entity.id;
               this.myPosition = { x: spawn.x, y: spawn.y, z: spawn.z, heading: spawn.heading };
-              this.emit('debug', `Found player in zone spawns: ${cleanName} at (${spawn.x}, ${spawn.y}, ${spawn.z})`);
+              this.emit('debug', `Found player in zone spawns: ${cleanName} at (${spawn.x}, ${spawn.y}, ${spawn.z}) spawnId=${entity.id}`);
             }
 
             this.emit('spawn', entity);
